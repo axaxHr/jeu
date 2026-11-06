@@ -76,32 +76,61 @@ Journal du serveur :
 journalctl -u bastions -f
 ```
 
-L'unité fournie écoute sur `127.0.0.1:3000` et attend nginx devant (étape
-suivante). Pour exposer le port directement sans nginx, mettez `HOST=0.0.0.0`
-et `TRUST_PROXY=false` dans le fichier de service.
+L'unité fournie écoute sur `127.0.0.1:3100` et attend nginx devant (étape
+suivante). Pour exposer le port directement sans nginx, mettez `HOST=0.0.0.0`,
+`PORT=3000` et `TRUST_PROXY=false` dans le fichier de service.
 
-## Nom de domaine et HTTPS avec nginx
+## Nom de domaine et HTTPS avec nginx (à côté d'un autre site)
 
-1. Faites pointer un enregistrement DNS (ex. `jeu.mondomaine.fr`) vers l'IP du VPS.
-2. Installez la config fournie et remplacez `jeu.example.com` par votre domaine :
+C'est le cas d'un serveur qui héberge déjà un autre jeu ou site sur son domaine
+(ex. `arenarow.io`). BASTIONS prend un **sous-domaine** à lui
+(`bastions.arenarow.io`), écoute seulement en local sur le port **3100**, et
+nginx lui envoie le trafic de ce sous-domaine. La config de l'autre site n'est
+pas modifiée.
+
+1. **DNS** : chez le registrar du domaine, ajoutez un enregistrement `A` nommé
+   `bastions` qui pointe vers l'IP du VPS (et un `AAAA` si le VPS a une IPv6).
+   Vérifiez (la commande doit afficher l'IP du VPS) :
 
 ```bash
-sudo cp deploy/nginx-bastions.conf /etc/nginx/sites-available/bastions && sudo ln -s /etc/nginx/sites-available/bastions /etc/nginx/sites-enabled/
+getent hosts bastions.arenarow.io
+```
+
+2. **Le jeu, en local sur le port 3100**. Avec Docker :
+
+```bash
+docker compose -f deploy/docker-compose.nginx.yml up -d --build
+```
+
+   Sans Docker : `deploy/bastions.service` (option B) écoute déjà sur 3100.
+   Vérifiez que le jeu répond :
+
+```bash
+curl -s http://127.0.0.1:3100/healthz
+```
+
+3. **nginx** : installez le site fourni (il est déjà réglé pour
+   `bastions.arenarow.io` ; pour un autre domaine, remplacez ce nom dans le fichier) :
+
+```bash
+sudo cp deploy/nginx-bastions.conf /etc/nginx/sites-available/bastions && sudo ln -sf /etc/nginx/sites-available/bastions /etc/nginx/sites-enabled/bastions
 ```
 
 ```bash
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-3. Certificat HTTPS gratuit :
+4. **HTTPS gratuit** (installez d'abord certbot si besoin :
+   `sudo apt install certbot python3-certbot-nginx`) :
 
 ```bash
-sudo certbot --nginx -d jeu.mondomaine.fr
+sudo certbot --nginx -d bastions.arenarow.io
 ```
 
-Le client passe automatiquement en `wss://` quand la page est en HTTPS. Avec
-Docker derrière nginx, publiez le port en local (`"127.0.0.1:3000:3000"`) et
-mettez `TRUST_PROXY: "true"`.
+Le client passe automatiquement en `wss://` quand la page est en HTTPS. Le
+fichier nginx utilise sa propre variable (`$bastions_connection_upgrade`), il
+ne peut donc pas entrer en conflit avec un `map $connection_upgrade` déjà défini
+par l'autre site.
 
 Le jeu fonctionne aussi dans un sous-dossier (`https://mondomaine.fr/bastions/`) :
 le WebSocket est toujours cherché à côté de la page.
@@ -148,5 +177,7 @@ Redémarrez le serveur après modification ; les joueurs rechargent la page.
 | La page s'affiche mais « Serveur injoignable » | Le proxy ne transmet pas le WebSocket : vérifiez les lignes `Upgrade`/`Connection` de la config nginx. |
 | « Trop de connexions » ou erreur 429 | Plusieurs joueurs derrière la même box : augmentez `MAX_CONN_PER_IP`. |
 | Toutes les connexions semblent venir de `127.0.0.1` | Derrière nginx sans `TRUST_PROXY=true`. |
+| `mondomaine.fr` affiche toujours l'autre site | Normal : c'est son nom. BASTIONS est sur son sous-domaine (`bastions.…`). Si le sous-domaine affiche aussi l'autre site, le DNS n'est pas encore propagé ou le site nginx `bastions` n'est pas activé (`ls /etc/nginx/sites-enabled/`). |
+| `docker compose up` : « port is already allocated » | Un autre programme occupe le port : utilisez `deploy/docker-compose.nginx.yml` (port 3100), ou changez `BASTIONS_PORT`. |
 | « La carte est pleine » | Augmentez `MAP_SIZE` (nouveau monde) ou baissez `INACTIVE_DAYS`. Les bases jouées moins de 10 minutes sont supprimées après 48 h d'absence. |
 | « Trop de nouveaux seigneurs depuis cette connexion » | Plusieurs amis créent leur compte depuis la même box : augmentez `NEW_PLAYERS_PER_IP_HOUR`. |

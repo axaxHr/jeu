@@ -16,7 +16,7 @@ Restart=on-failure
 RestartSec=3
 
 # Behind nginx on the same machine: listen on localhost only and trust X-Forwarded-For.
-Environment=PORT=3000
+Environment=PORT=3100
 Environment=HOST=127.0.0.1
 Environment=TRUST_PROXY=true
 Environment=DATA_DIR=/var/lib/bastions
