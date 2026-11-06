@@ -3,9 +3,9 @@
  * units with shadows, combat effects, placement preview and the minimap.
  * Reads ClientState, never mutates it.
  */
-import { CONFIG, TILE } from './shared/config.js';
+import { CONFIG, TILE, NEUTRAL, NEUTRAL_COLOR, keepLevel } from './shared/config.js';
 import {
-  ART, PAL, teamRamp, keepSprite, towerSprite, mineSprite, barracksSprite, wallSprite, unitSprite, makeCanvas,
+  ART, PAL, teamRamp, keepSprite, wallSprite, gateSprite, shrineSprite, campSprite, spriteFor, unitSprite, makeCanvas,
 } from './sprites.js';
 import { TerrainPainter, MINI_COLORS, hash } from './terrain.js';
 
@@ -47,7 +47,7 @@ export class Renderer {
     this.terrain = null;
     this.painter = null;
     this.miniTerrain = null;
-    this.borders = new Map();
+    this.borders = { version: -1, byOwner: new Map() };
     this.reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
     this.shadowSmall = ellipseSprite(10, 4, 'rgba(18, 10, 24, 0.35)');
     this.shadowBig = ellipseSprite(16, 6, 'rgba(18, 10, 24, 0.35)');
@@ -92,7 +92,7 @@ export class Renderer {
     const st = this.state;
     this.painter = new TerrainPainter(st.tiles, st.size);
     this.terrain = this.painter.paintAll();
-    this.borders.clear();
+    this.borders = { version: -1, byOwner: new Map() };
     const { c, g } = makeCanvas(st.size, st.size);
     const img = g.createImageData(st.size, st.size);
     for (let i = 0; i < st.size * st.size; i++) {
@@ -112,25 +112,37 @@ export class Renderer {
     g.fillRect(i % this.state.size, Math.floor(i / this.state.size), 1, 1);
   }
 
-  /** Tile-edge segments [x, y, dx, dy] outlining the territory disc of `core`. Cached. */
-  borderOf(core) {
-    const key = `${core.id}`;
-    let segs = this.borders.get(key);
-    if (segs) return segs;
-    const r = CONFIG.territory.radius;
-    const inside = (x, y) => (x - core.x) ** 2 + (y - core.y) ** 2 <= r * r;
-    segs = [];
-    for (let y = core.y - r; y <= core.y + r; y++) {
-      for (let x = core.x - r; x <= core.x + r; x++) {
-        if (!inside(x, y)) continue;
-        if (!inside(x, y - 1)) segs.push([x, y, 1, 0]);
-        if (!inside(x, y + 1)) segs.push([x, y + 1, 1, 0]);
-        if (!inside(x - 1, y)) segs.push([x, y, 0, 1]);
-        if (!inside(x + 1, y)) segs.push([x + 1, y, 0, 1]);
+  /**
+   * Territory borders per owner: tile-edge segments [x, y, dx, dy] where the
+   * owner's land (union of keep and outpost claims) meets someone else's or
+   * no-man's land. Recomputed only when a claim changes.
+   */
+  territoryBorders() {
+    const st = this.state;
+    if (this.borders.version === st.claimsVersion) return this.borders.byOwner;
+    const claims = st.claims();
+    const byOwner = new Map();
+    const owner = (x, y) => st.ownerOfTile(x, y);
+    const seen = new Set();
+    for (const c of claims) {
+      let segs = byOwner.get(c.owner);
+      if (!segs) { segs = { segs: [], x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }; byOwner.set(c.owner, segs); }
+      segs.x0 = Math.min(segs.x0, c.x - c.r); segs.y0 = Math.min(segs.y0, c.y - c.r);
+      segs.x1 = Math.max(segs.x1, c.x + c.r); segs.y1 = Math.max(segs.y1, c.y + c.r);
+      for (let y = c.y - c.r; y <= c.y + c.r; y++) {
+        for (let x = c.x - c.r; x <= c.x + c.r; x++) {
+          const key = y * 4096 + x;
+          if (seen.has(key) || owner(x, y) !== c.owner) continue;
+          seen.add(key);
+          if (owner(x, y - 1) !== c.owner) segs.segs.push([x, y, 1, 0]);
+          if (owner(x, y + 1) !== c.owner) segs.segs.push([x, y + 1, 1, 0]);
+          if (owner(x - 1, y) !== c.owner) segs.segs.push([x, y, 0, 1]);
+          if (owner(x + 1, y) !== c.owner) segs.segs.push([x + 1, y, 0, 1]);
+        }
       }
     }
-    this.borders.set(key, segs);
-    return segs;
+    this.borders = { version: st.claimsVersion, byOwner };
+    return byOwner;
   }
 
   // ------------------------------------------------------------ frame
@@ -223,14 +235,15 @@ export class Renderer {
   drawTerritories(ctx, now, visible) {
     const st = this.state;
     const z = this.cam.zoom;
-    const r = CONFIG.territory.radius;
     const march = this.reducedMotion ? 0 : Math.floor(now / 140) % 4;
-    for (const b of st.buildings.values()) {
-      if (b.kind !== 'core' || !visible(b.x, b.y, r + 2)) continue;
-      const p = st.players.get(b.owner);
-      const mine = b.owner === st.youId;
-      const color = p && p.shielded ? PAL.w4 : mine ? PAL.y2 : teamRamp(p ? p.color : '#888888').t3;
-      for (const [x, y, dx, dy] of this.borderOf(b)) {
+    for (const [ownerId, area] of this.territoryBorders()) {
+      if (!visible((area.x0 + area.x1) / 2, (area.y0 + area.y1) / 2, (area.x1 - area.x0) / 2 + 2)) continue;
+      const p = st.players.get(ownerId);
+      const mine = ownerId === st.youId;
+      const ally = !mine && st.friendly(ownerId);
+      const color = p && p.shielded ? PAL.w4 : mine ? PAL.y2 : ally ? PAL.g5 : teamRamp(p ? p.color : '#888888').t3;
+      for (const [x, y, dx, dy] of area.segs) {
+        if (!visible(x, y, 1)) continue;
         const [sx, sy] = this.toScreen(x, y);
         for (let k = 0; k < ART; k += 4) {
           const kk = (k + (mine ? march : 0)) % ART;
@@ -248,22 +261,29 @@ export class Renderer {
   /** In build mode, light up every tile where this building could go (gold permitting). */
   drawBuildZone(ctx, kind) {
     const st = this.state;
-    const core = st.myCore();
-    if (!core) return;
-    const r = CONFIG.territory.radius;
+    if (!st.myCore()) return;
     const s = Math.round(this.scale);
+    const counts = st.counts();
+    const done = new Set();
     ctx.fillStyle = 'rgba(255, 229, 140, 0.12)';
-    for (let y = core.y - r; y <= core.y + r; y++) {
-      for (let x = core.x - r; x <= core.x + r; x++) {
-        const reason = st.canBuild(kind, x, y);
-        if (reason && reason !== 'Pas assez d\'or.') continue;
-        const [sx, sy] = this.toScreen(x, y);
-        ctx.fillRect(Math.round(sx) + 1, Math.round(sy) + 1, s - 2, s - 2);
+    for (const c of st.claims()) {
+      if (c.owner !== st.youId) continue;
+      for (let y = c.y - c.r; y <= c.y + c.r; y++) {
+        for (let x = c.x - c.r; x <= c.x + c.r; x++) {
+          const key = y * 4096 + x;
+          if (done.has(key)) continue;
+          done.add(key);
+          const reason = st.canBuild(kind, x, y, counts);
+          if (reason && reason !== 'Ressources insuffisantes.') continue;
+          const [sx, sy] = this.toScreen(x, y);
+          ctx.fillRect(Math.round(sx) + 1, Math.round(sy) + 1, s - 2, s - 2);
+        }
       }
     }
   }
 
   ownerColor(owner) {
+    if (owner === NEUTRAL) return NEUTRAL_COLOR;
     const p = this.state.players.get(owner);
     return p ? p.color : '#888888';
   }
@@ -274,18 +294,24 @@ export class Renderer {
     const joins = (x, y) => {
       if (x < 0 || y < 0 || x >= st.size || y >= st.size) return false;
       const o = st.buildingAt(x, y);
-      return !!o && o.owner === b.owner && (o.kind === 'wall' || o.kind === 'tower');
+      return !!o && o.owner === b.owner && (o.kind === 'wall' || o.kind === 'gate' || o.kind === 'tower');
     };
     return (joins(b.x, b.y - 1) ? 1 : 0) | (joins(b.x + 1, b.y) ? 2 : 0) | (joins(b.x, b.y + 1) ? 4 : 0) | (joins(b.x - 1, b.y) ? 8 : 0);
   }
 
   spriteOf(b, color) {
     switch (b.kind) {
-      case 'core': return keepSprite(color);
-      case 'tower': return towerSprite(color);
-      case 'mine': return mineSprite(color);
-      case 'barracks': return barracksSprite(color);
-      default: return wallSprite(color, b.mask ?? this.wallMask(b));
+      case 'core': return keepSprite(color, b.level || 1);
+      case 'wall': return wallSprite(color, b.mask ?? this.wallMask(b));
+      case 'gate': return gateSprite(color, b.mask ?? this.wallMask(b));
+      case 'shrine': {
+        const holder = this.state.players.get(b.holder);
+        return shrineSprite(holder ? holder.color : null);
+      }
+      case 'camp_barbarian': return campSprite('barbarian');
+      case 'camp_wolves': return campSprite('wolves');
+      case 'camp_ogre': return campSprite('ogre');
+      default: return spriteFor(b.kind, color);
     }
   }
 
@@ -304,8 +330,8 @@ export class Renderer {
 
   drawBuilding(ctx, b, focused) {
     const color = b.color || this.ownerColor(b.owner);
-    if (b.kind === 'core') this.shadow(ctx, this.shadowKeep, b.x + 0.5, b.y + 0.95);
-    else if (b.kind !== 'wall') this.shadow(ctx, this.shadowBig, b.x + 0.5, b.y + 0.95);
+    if (b.kind === 'core' || b.kind === 'shrine') this.shadow(ctx, this.shadowKeep, b.x + 0.5, b.y + 0.95);
+    else if (b.kind !== 'wall' && b.kind !== 'gate') this.shadow(ctx, this.shadowBig, b.x + 0.5, b.y + 0.95);
     this.blit(ctx, this.spriteOf(b, color), b.x, b.y);
     if (!focused) return;
     const [sx, sy] = this.toScreen(b.x, b.y);
@@ -348,11 +374,26 @@ export class Renderer {
   }
 
   buildingBar(ctx, b) {
-    const max = CONFIG.buildings[b.kind].hp;
+    if (b.kind === 'shrine') { this.shrineBar(ctx, b); return; }
+    const max = b.kind === 'core' ? keepLevel(b.level || 1).hp : CONFIG.buildings[b.kind].hp;
     if (b.hp >= max) return;
     const lift = b.kind === 'core' ? 1.15 : b.kind === 'tower' ? 0.95 : 0.45;
     const [sx, sy] = this.toScreen(b.x + 0.5, b.y - lift);
     this.bar(ctx, sx, sy, b.kind === 'core' ? 20 : 12, b.hp / max);
+  }
+
+  /** Capture progress above the Sanctuary. */
+  shrineBar(ctx, b) {
+    const s = this.state.shrine;
+    if (!s || s.progress <= 0) return;
+    const [sx, sy] = this.toScreen(b.x + 0.5, b.y - 1.3);
+    const z = Math.max(1, Math.round(this.cam.zoom));
+    const w = 24 * z;
+    const x = Math.round(sx - w / 2);
+    ctx.fillStyle = PAL.ink;
+    ctx.fillRect(x - z, Math.round(sy) - z, w + 2 * z, 4 * z);
+    ctx.fillStyle = s.contested ? PAL.red : PAL.w4;
+    ctx.fillRect(x, Math.round(sy), Math.round(w * Math.min(1, s.progress / s.need)), 2 * z);
   }
 
   unitBar(ctx, u, x, y) {
@@ -397,8 +438,9 @@ export class Renderer {
       if (b.kind !== 'core' || !visible(b.x, b.y, 2)) continue;
       const p = st.players.get(b.owner);
       if (!p) continue;
-      const [sx, sy] = this.toScreen(b.x + 0.5, b.y - 1.55);
-      const w = Math.round(ctx.measureText(p.name).width + size * 0.9);
+      const [sx, sy] = this.toScreen(b.x + 0.5, b.y - 1.55 - (b.level > 1 ? 0.35 : 0));
+      const label = p.clan ? `[${p.clan}] ${p.name}` : p.name;
+      const w = Math.round(ctx.measureText(label).width + size * 0.9);
       const h = Math.round(size * 1.35);
       const x = Math.round(sx - w / 2);
       const y = Math.round(sy - h / 2);
@@ -410,7 +452,7 @@ export class Renderer {
       ctx.fillStyle = ramp.t2;
       ctx.fillRect(x, y, w, 2);
       ctx.fillStyle = PAL.cloth;
-      ctx.fillText(p.name, Math.round(sx), Math.round(sy) + 1);
+      ctx.fillText(label, Math.round(sx), Math.round(sy) + 1);
       if (p.shielded) {
         const ix = x + w + 6;
         ctx.fillStyle = PAL.ink;
@@ -444,6 +486,24 @@ export class Renderer {
           ctx.fillStyle = PAL.y3;
           ctx.fillRect(Math.round(ax - z), Math.round(ay - z), 2 * z, 2 * z);
         }
+      } else if (f.type === 'boulder') {
+        const len = Math.hypot(f.x1 - f.x0, f.y1 - f.y0) || 1;
+        const lob = Math.sin(t * Math.PI) * Math.min(2.5, len / 3);
+        const [ax, ay] = this.toScreen(f.x0 + (f.x1 - f.x0) * t, f.y0 + (f.y1 - f.y0) * t - lob - 0.5);
+        ctx.fillStyle = PAL.ink;
+        ctx.fillRect(Math.round(ax - 2 * z), Math.round(ay - 2 * z), 4 * z, 4 * z);
+        ctx.fillStyle = PAL.s3;
+        ctx.fillRect(Math.round(ax - z), Math.round(ay - z), 2 * z, 2 * z);
+        if (t > 0.85) {
+          const [bx, by] = this.toScreen(f.x1, f.y1);
+          ctx.fillStyle = PAL.s2;
+          for (let k = 0; k < 6; k++) ctx.fillRect(Math.round(bx + Math.cos(k) * 6 * z * (t - 0.8) * 5), Math.round(by + Math.sin(k) * 3 * z * (t - 0.8) * 5), 2 * z, 2 * z);
+        }
+      } else if (f.type === 'heal') {
+        const [ax, ay] = this.toScreen(f.x1, f.y1 - 0.6 - t * 0.6);
+        ctx.fillStyle = t < 0.6 ? PAL.g5 : PAL.g4;
+        ctx.fillRect(Math.round(ax - z), Math.round(ay - 3 * z), 2 * z, 6 * z);
+        ctx.fillRect(Math.round(ax - 3 * z), Math.round(ay - z), 6 * z, 2 * z);
       } else if (f.type === 'melee') {
         const [ax, ay] = this.toScreen(f.x1, f.y1 - 0.4);
         ctx.fillStyle = t < 0.5 ? PAL.cloth : PAL.metal;
@@ -524,6 +584,15 @@ export class Renderer {
     m.imageSmoothingEnabled = false;
     m.drawImage(this.miniTerrain, 0, 0, W, W);
     for (const b of st.buildings.values()) {
+      if (b.owner === NEUTRAL) {
+        const isShrine = b.kind === 'shrine';
+        const holder = isShrine ? st.players.get(b.holder) : null;
+        m.fillStyle = PAL.ink;
+        m.fillRect(Math.round((b.x - 1) * k) - 1, Math.round((b.y - 1) * k) - 1, Math.round(3 * k) + 2, Math.round(3 * k) + 2);
+        m.fillStyle = isShrine ? (holder ? holder.color : PAL.w4) : PAL.redD;
+        m.fillRect(Math.round((b.x - 1) * k), Math.round((b.y - 1) * k), Math.round(3 * k), Math.round(3 * k));
+        continue;
+      }
       const ramp = teamRamp(this.ownerColor(b.owner));
       if (b.kind === 'core') {
         m.fillStyle = PAL.ink;

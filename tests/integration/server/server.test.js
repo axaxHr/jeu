@@ -21,12 +21,12 @@ let game;
 let base;
 
 before(async () => {
-  const world = new World({ seed: 4242, size: 96 });
+  const world = new World({ seed: 4242, size: 160 });
   server = http.createServer(createStaticHandler([
     { prefix: '/', dir: path.join(root, 'client') },
     { prefix: '/shared/', dir: path.join(root, 'shared') },
   ]));
-  game = new GameServer({ world, httpServer: server, options: { maxConnPerIp: 20, newPlayersPerIpHour: 100 } });
+  game = new GameServer({ world, httpServer: server, options: { maxConnPerIp: 20, newPlayersPerIpHour: 100, connectsPerIpMinute: 1000 } });
   game.start({ saveEverySeconds: 0 });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `127.0.0.1:${server.address().port}`;
@@ -206,4 +206,38 @@ test('net_ip_key_groups_ipv6_by_64_and_unwraps_mapped_ipv4', () => {
   assert.equal(ipKey('::ffff:203.0.113.9'), '203.0.113.9');
   assert.equal(ipKey('2001:db8:1:2:aaaa::1'), ipKey('2001:db8:1:2:bbbb:cccc:dddd:eeee'));
   assert.notEqual(ipKey('2001:db8:1:2::1'), ipKey('2001:db8:1:3::1'));
+});
+
+test('net_units_far_from_the_camera_are_not_sent_until_the_view_moves_there', async () => {
+  const { c, welcome } = await join('Vigie');
+  const core = welcome.buildings.find((b) => b[1] === welcome.you.id && b[2] === 0);
+  const fx = core[3] > 48 ? 5 : 90;
+  const far = game.world.spawnUnit(0, 'wolf', fx + 0.5, 5.5);
+  const first = await c.waitFor((m) => m.t === 's');
+  const ids = (m) => m.w.u.filter((_, i) => i % 6 === 0);
+  assert.equal(ids(first).includes(far.id), false, 'far unit hidden');
+  c.send({ t: 'view', x: fx, y: 5 });
+  const later = await c.waitFor((m) => m.t === 's' && ids(m).includes(far.id));
+  assert.ok(later);
+  game.world.removeUnit(far);
+  await c.close();
+});
+
+test('net_clan_invites_and_clan_chat_reach_only_members', async () => {
+  const a = await join('Chef');
+  const b = await join('Recrue');
+  const outsider = await join('Passant');
+  a.c.send({ t: 'clan', op: 'create', tag: 'ours' });
+  await a.c.waitFor((m) => m.t === 'players' && m.list.some((p) => p.name === 'Chef' && p.clan === 'OURS'));
+  a.c.send({ t: 'clan', op: 'invite', target: b.welcome.you.id });
+  const inv = await b.c.waitFor((m) => m.t === 'notice' && m.kind === 'invite');
+  assert.equal(inv.tag, 'OURS');
+  b.c.send({ t: 'clan', op: 'accept' });
+  await b.c.waitFor((m) => m.t === 'players' && m.list.some((p) => p.name === 'Recrue' && p.clan === 'OURS'));
+  a.c.send({ t: 'chat', ch: 'clan', text: 'rendez-vous au sanctuaire' });
+  const line = await b.c.waitFor((m) => m.t === 'chat' && m.clan === 'OURS');
+  assert.equal(line.text, 'rendez-vous au sanctuaire');
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(outsider.c.inbox.some((m) => m.t === 'chat' && m.clan), false, 'outsider did not get clan chat');
+  await Promise.all([a.c.close(), b.c.close(), outsider.c.close()]);
 });

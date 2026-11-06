@@ -2,13 +2,16 @@
  * BASTIONS browser client: login, connection, the game controller that maps
  * input to server intents, and the render loop.
  */
-import { CONFIG, PLAYER_COLORS } from './shared/config.js';
+import { CONFIG, PLAYER_COLORS, keepLevel, costLabel } from './shared/config.js';
 import { PROTOCOL_VERSION, cleanName, cleanChat, LIMITS } from './shared/protocol.js';
 import { ClientState } from './state.js';
 import { Renderer, ZOOM_DEFAULT } from './render.js';
 import { Connection, socketUrl } from './net.js';
 import { attachInput, zoomAt } from './input.js';
-import { el, initCosts, paintIcons, renderStatus, renderBoard, addChatLine, clearUnread, toast, setHint, setActive } from './ui.js';
+import {
+  el, paintIcons, renderTab, tabActions, updateActions, renderStatus, renderBoard, addChatLine, clearUnread,
+  toast, setHint, setCardActions, renderClan,
+} from './ui.js';
 import { loadDemoWorld } from './demo.js';
 
 const STORE_KEY = 'bastions.session';
@@ -24,6 +27,7 @@ const store = {
   },
 };
 
+const TABS = ['build', 'army', 'keep'];
 const state = new ClientState();
 const renderer = new Renderer(el.world, el.minimap, state);
 const view = { build: null, hover: null, selection: new Set(), box: null, focusBuilding: 0 };
@@ -33,6 +37,11 @@ let firstWelcome = true;
 let pendingName = '';
 let lastPaintTile = -1;
 let demo = null;
+let tab = 'build';
+let myColor = PLAYER_COLORS[0];
+let chatChannel = 'all';
+let card = null;
+let sentView = { x: -99, y: -99 };
 
 // ------------------------------------------------------------------ login
 
@@ -109,13 +118,15 @@ function onMessage(msg) {
       refreshHud();
       break;
     case 'players':
-      state.setPlayers(msg.list);
-      renderBoard(msg.list, state.youId);
+      state.setPlayers(msg.list, msg.shrine);
+      renderBoard(msg.list, state.youId, state.shrine, openPlayerCard);
+      renderClan(state.me, state.players);
       break;
     case 'chat':
       addChatLine(msg);
       break;
     case 'notice':
+      if (msg.kind === 'invite') { refreshInvite(); break; }
       toast(msg.text, msg.kind, msg.kind === 'alert' ? 5000 : 3600);
       if (msg.kind === 'alert' && Number.isInteger(msg.x)) state.alerts.push({ x: msg.x, y: msg.y, t0: now });
       break;
@@ -145,109 +156,219 @@ function onWelcome(msg, now) {
   demo = null;
   state.applyWelcome(msg, now);
   renderer.buildTerrain();
-  paintIcons(msg.you.color);
+  myColor = msg.you.color;
+  paintIcons(myColor);
+  renderTab(tab, myColor);
   inGame = true;
   el.login.hidden = true;
   el.hud.hidden = false;
   el.conn.hidden = true;
   el.chatLog.replaceChildren();
   for (const line of msg.chat) addChatLine(line);
-  renderBoard(msg.players, state.youId);
+  renderBoard(msg.players, state.youId, state.shrine, openPlayerCard);
   renderer.resize();
   if (firstWelcome || !reconnect) centerOnBase();
   firstWelcome = false;
   view.selection.clear();
+  sentView = { x: -99, y: -99 };
   refreshHud();
   if (!reconnect) {
-    toast(`Bienvenue, ${msg.you.name}. Votre Noyau est au centre du cercle doré.`, 'info', 5000);
+    toast(`Bienvenue, ${msg.you.name}. Ton Donjon est au centre de la bordure dorée.`, 'info', 5000);
   }
 }
 
 // ------------------------------------------------------------------ HUD
 
-function ownCounts() {
-  const counts = { core: 0, wall: 0, tower: 0, mine: 0, barracks: 0 };
-  for (const b of state.buildings.values()) if (b.owner === state.youId) counts[b.kind]++;
-  return counts;
-}
-
 function refreshHud() {
-  const counts = ownCounts();
-  renderStatus(state.me, counts);
-  setActive('[data-build]', (b) => b.dataset.build === view.build);
+  const counts = state.counts();
+  renderStatus(state.me);
+  updateActions(state, view);
   el.selection.hidden = view.selection.size === 0;
   el.selCount.textContent = `${view.selection.size} unité${view.selection.size > 1 ? 's' : ''}`;
   el.world.classList.toggle('building', !!view.build);
   el.world.classList.toggle('commanding', !view.build && view.selection.size > 0);
+  el.chatCh.hidden = !state.me.clan;
+  if (!state.me.clan && chatChannel === 'clan') setChannel('all');
   refreshCard();
+  refreshInvite();
+  if (!el.clan.hidden) renderClan(state.me, state.players);
 
   if (view.build) {
     const def = CONFIG.buildings[view.build];
-    const how = view.build === 'mine' ? 'touchez un filon doré de votre territoire' : 'touchez une case libre de votre territoire';
-    setHint(`${def.name} (${def.cost} or) : ${how}${view.build === 'wall' ? ', ou glissez pour tracer un rempart' : ''}. Échap pour annuler.`);
+    const where = def.needsGold ? 'sur un filon doré'
+      : def.near === 'forest' ? 'contre la forêt'
+        : def.near === 'rock' ? 'contre la roche' : 'sur une case libre';
+    setHint(`${def.name} (${costLabel(def.cost)}) : touche ${where} de ton territoire${view.build === 'wall' ? ', ou glisse pour tracer un rempart' : ''}. Échap pour annuler.`);
   } else if (view.selection.size > 0) {
-    setHint('Touchez un ennemi pour attaquer, ou une case pour vous déplacer.');
+    setHint('Touche un ennemi ou un camp de monstres pour attaquer, ou une case pour te déplacer.');
   } else if (counts.mine === 0) {
-    setHint('Astuce : posez une Mine (3) sur un filon doré pour augmenter vos revenus.');
+    setHint('Astuce : pose une Mine sur un filon doré (onglet Bâtir).');
+  } else if (counts.sawmill === 0) {
+    setHint('Astuce : une Scierie collée à la forêt produit du bois.');
+  } else if (counts.quarry === 0) {
+    setHint('Astuce : une Carrière collée à la roche produit de la pierre.');
   } else if (counts.barracks === 0) {
-    setHint('Astuce : une Caserne (4) permet de recruter une armée.');
-  } else if (state.me.units === 0 && state.me.queue === 0) {
-    setHint('Astuce : recrutez des Guerriers (5) et des Archers (6).');
+    setHint('Astuce : une Caserne permet de recruter une armée.');
+  } else if (state.me.level === 1 && state.me.pop > 0) {
+    setHint('Astuce : améliore ton Donjon (onglet Donjon) pour agrandir ton territoire.');
   } else {
     setHint('');
   }
 }
 
-function openCard(b) {
+function refreshInvite() {
+  const inv = state.me.invite;
+  el.invite.hidden = !inv;
+  if (inv) el.inviteText.textContent = `${inv.from} t'invite dans le clan [${inv.tag}]`;
+}
+
+function closeCard() {
+  card = null;
+  view.focusBuilding = 0;
+  el.card.hidden = true;
+}
+
+function openBuildingCard(b) {
+  card = { type: 'building', id: b.id };
   view.focusBuilding = b.id;
   el.card.hidden = false;
   refreshCard();
 }
 
-function closeCard() {
+function openPlayerCard(p) {
+  card = { type: 'player', id: p.id };
   view.focusBuilding = 0;
-  el.card.hidden = true;
+  el.card.hidden = false;
+  refreshCard();
+}
+
+function attackWithArmy(target) {
+  const ids = view.selection.size > 0 ? [...view.selection] : null;
+  command(ids, target.bid ? { type: 'attack', bid: target.bid } : { type: 'attack', uid: target.uid }, target.x, target.y);
+  closeCard();
 }
 
 function refreshCard() {
-  if (!view.focusBuilding) return;
-  const b = state.buildings.get(view.focusBuilding);
+  if (!card) return;
+  if (card.type === 'player') { refreshPlayerCard(); return; }
+  const b = state.buildings.get(card.id);
   if (!b) { closeCard(); return; }
   const def = CONFIG.buildings[b.kind];
   const owner = state.players.get(b.owner);
   const mine = b.owner === state.youId;
-  el.cardTitle.textContent = mine ? def.name : `${def.name} de ${owner ? owner.name : '?'}`;
-  const lines = [`${Math.max(0, b.hp)} / ${def.hp} PV`];
-  if (b.kind === 'tower') lines.push(`portée ${def.range} cases, ${def.damage} dégâts`);
-  if (b.kind === 'mine') lines.push(`+${def.income} or/s`);
-  if (b.kind === 'core') lines.push(mine ? 'S\'il tombe, toute votre base s\'effondre.' : `+${def.income} or/s · le raser pille 30 % de l'or`);
-  if (b.kind === 'barracks') lines.push(`+${def.unitCap} de population`);
-  if (!mine && owner && owner.shielded) lines.push('Protégé par un bouclier.');
-  el.cardBody.textContent = lines.join(' · ');
+  const ally = !mine && state.friendly(b.owner);
+  const maxHp = b.kind === 'core' ? keepLevel(b.level).hp : def.hp;
+  const lines = [];
+  const actions = [];
+  const haveArmy = state.me.pop > 0;
+  const armyLabel = view.selection.size > 0 ? `Attaquer (${view.selection.size})` : 'Attaquer avec l\'armée';
 
-  const action = el.cardAction;
-  action.className = 'btn btn-small';
-  if (mine && b.kind !== 'core') {
-    const refund = Math.floor(def.cost * CONFIG.economy.demolishRefund * (b.hp / def.hp));
-    action.hidden = false;
-    action.textContent = `Démolir (+${refund} or)`;
-    action.classList.add('btn-danger');
-    action.onclick = () => { conn.send({ t: 'demolish', id: b.id }); closeCard(); };
-  } else if (!mine && state.me.units > 0) {
-    action.hidden = false;
-    action.textContent = view.selection.size > 0 ? `Attaquer avec la sélection (${view.selection.size})` : 'Attaquer avec toute l\'armée';
-    action.classList.add('btn-primary');
-    action.onclick = () => {
-      const ids = view.selection.size > 0 ? [...view.selection] : null;
-      command(ids, { type: 'attack', bid: b.id }, b.x + 0.5, b.y + 0.5);
-      closeCard();
-    };
+  if (b.kind === 'shrine') {
+    el.cardTitle.textContent = def.name;
+    const holder = state.players.get(b.holder);
+    const s = state.shrine;
+    lines.push(holder ? `Tenu par ${holder.name}.` : 'Libre.');
+    lines.push(`Reste seul à ${CONFIG.shrine.radius} cases avec tes troupes pendant ${CONFIG.shrine.captureSeconds} s pour le capturer.`);
+    lines.push(`Rapporte ${costLabel(CONFIG.shrine.income)} par seconde, et de la gloire.`);
+    if (s && s.progress > 0) lines.push(`Capture en cours : ${s.progress}/${s.need} s${s.contested ? ' (disputé)' : ''}.`);
+    if (haveArmy) {
+      actions.push({
+        label: 'Envoyer l\'armée', kind: 'gold', onClick: () => {
+          const ids = view.selection.size > 0 ? [...view.selection] : null;
+          command(ids, { type: 'move', x: b.x, y: b.y + 2 }, b.x + 0.5, b.y + 2.5);
+          closeCard();
+        },
+      });
+    }
+  } else if (def.camp) {
+    const camp = CONFIG.camps.kinds[def.camp];
+    el.cardTitle.textContent = def.name;
+    lines.push(`${Math.max(0, Math.round(b.hp))} / ${maxHp} PV.`);
+    lines.push(`Trésor : ${costLabel(camp.loot)}, +${camp.glory} gloire. Gardé par des monstres.`);
+    if (haveArmy) actions.push({ label: armyLabel, kind: 'gold', onClick: () => attackWithArmy({ bid: b.id, x: b.x + 0.5, y: b.y + 0.5 }) });
   } else {
-    action.hidden = true;
+    el.cardTitle.textContent = mine ? def.name : `${def.name} de ${owner ? owner.name : '?'}`;
+    lines.push(`${Math.max(0, Math.round(b.hp))} / ${maxHp} PV`);
+    if (b.kind === 'core') {
+      const kl = keepLevel(b.level);
+      lines.push(`niveau ${b.level}, territoire ${kl.radius} cases`);
+      if (mine) lines.push(`+${costLabel(kl.income)} /s`);
+    }
+    if (b.kind === 'tower') lines.push(`portée ${def.range}, ${def.damage} dégâts`);
+    if (def.income) lines.push(`+${costLabel(def.income)} /s`);
+    if (def.near) {
+      const code = def.near === 'forest' ? 3 : 2;
+      let n = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if ((dx || dy) && state.tileAt(b.x + dx, b.y + dy) === code) n++;
+      const [r, v] = Object.entries(def.perTile)[0];
+      lines.push(`+${Math.min(def.maxIncome, Math.round(v * n * 10) / 10)} ${r === 'wood' ? 'bois' : 'pierre'}/s`);
+    }
+    if (def.popCap) lines.push(`+${def.popCap} places d'armée`);
+    if (ally) lines.push('Allié.');
+    if (!mine && owner && owner.shielded) lines.push('Protégé par un bouclier.');
+
+    if (mine && b.kind === 'core' && b.level < CONFIG.keep.levels.length) {
+      const next = keepLevel(b.level + 1);
+      actions.push({ label: `Niveau ${b.level + 1}`, kind: 'gold', cost: next.cost, onClick: () => conn.send({ t: 'upgrade' }) });
+    }
+    if (mine && b.kind === 'forge') {
+      for (const tech of Object.keys(CONFIG.techs)) {
+        const t = CONFIG.techs[tech];
+        const lvl = state.me.techs[tech];
+        if (lvl < t.costs.length) {
+          actions.push({ label: `${t.name} ${lvl + 1}`, kind: 'gold', cost: t.costs[lvl], onClick: () => conn.send({ t: 'research', tech }) });
+        }
+      }
+    }
+    if (mine && b.kind !== 'core') {
+      const k = CONFIG.economy.demolishRefund * (b.hp / def.hp);
+      const refund = {};
+      for (const [r, v] of Object.entries(def.cost)) refund[r] = Math.floor(v * k);
+      actions.push({ label: 'Démolir', kind: 'danger', cost: refund, onClick: () => { conn.send({ t: 'demolish', id: b.id }); closeCard(); } });
+    } else if (!mine && !ally && haveArmy) {
+      actions.push({ label: armyLabel, kind: 'gold', onClick: () => attackWithArmy({ bid: b.id, x: b.x + 0.5, y: b.y + 0.5 }) });
+    }
   }
+  el.cardBody.textContent = lines.join(' · ');
+  setCardActions(actions);
+}
+
+function refreshPlayerCard() {
+  const p = state.players.get(card.id);
+  if (!p) { closeCard(); return; }
+  el.cardTitle.textContent = `${p.clan ? `[${p.clan}] ` : ''}${p.name}`;
+  el.cardBody.textContent = [
+    `${p.glory} gloire`,
+    p.level ? `Donjon niveau ${p.level}` : 'sans Donjon',
+    p.online ? 'en ligne' : 'hors ligne',
+    p.shielded ? 'sous bouclier' : null,
+  ].filter(Boolean).join(' · ');
+  const actions = [];
+  if (p.cx >= 0) {
+    actions.push({ label: 'Voir sa base', onClick: () => { renderer.cam.x = p.cx + 0.5; renderer.cam.y = p.cy + 0.5; closeCard(); } });
+  }
+  if (p.id !== state.youId && state.me.clan && !p.clan) {
+    actions.push({ label: `Inviter dans [${state.me.clan}]`, kind: 'gold', onClick: () => { conn.send({ t: 'clan', op: 'invite', target: p.id }); toast(`Invitation envoyée à ${p.name}.`); } });
+  }
+  if (p.id !== state.youId && !state.me.clan) {
+    actions.push({ label: 'Fonder un clan', onClick: () => { closeCard(); openClan(); } });
+  }
+  setCardActions(actions);
+}
+
+function openClan() {
+  el.clan.hidden = false;
+  renderClan(state.me, state.players);
+  if (!state.me.clan) el.clanTag.focus();
 }
 
 // ------------------------------------------------------------------ actions
+
+function setTab(next) {
+  tab = next;
+  renderTab(tab, myColor);
+  updateActions(state, view);
+}
 
 function setBuild(kind) {
   view.build = view.build === kind ? null : kind;
@@ -255,14 +376,25 @@ function setBuild(kind) {
   refreshHud();
 }
 
-function train(kind) {
-  conn.send({ t: 'train', kind });
+function runAction(btn) {
+  const { act, kind, tech } = btn.dataset;
+  if (btn.classList.contains('locked')) { toast(`Verrouillé : ${btn.querySelector('.lock span').textContent}.`, 'err', 2000); return; }
+  switch (act) {
+    case 'build': setBuild(kind); break;
+    case 'train': conn.send({ t: 'train', kind }); break;
+    case 'army': selectArmy(); break;
+    case 'recall': command(null, { type: 'recall' }, (state.myCore()?.x ?? 0) + 0.5, (state.myCore()?.y ?? 0) + 0.5); break;
+    case 'upgrade': conn.send({ t: 'upgrade' }); break;
+    case 'research': conn.send({ t: 'research', tech }); break;
+    case 'clan': openClan(); break;
+    default: centerOnBase(); break;
+  }
 }
 
 function selectArmy() {
   view.build = null;
   view.selection = new Set([...state.units.values()].filter((u) => u.owner === state.youId).map((u) => u.id));
-  if (view.selection.size === 0) toast('Vous n\'avez pas encore d\'unités : recrutez-en à la Caserne.', 'err');
+  if (view.selection.size === 0) toast('Tu n\'as pas encore d\'unités : recrute-en (onglet Armée).', 'err');
   refreshHud();
 }
 
@@ -289,6 +421,13 @@ function tryBuild(tx, ty, quiet) {
   const reason = state.canBuild(view.build, tx, ty);
   if (reason) { if (!quiet) toast(reason, 'err', 2200); return; }
   conn.send({ t: 'build', kind: view.build, x: tx, y: ty });
+}
+
+function setChannel(ch) {
+  chatChannel = ch;
+  el.chatCh.textContent = ch === 'clan' ? `[${state.me.clan || 'Clan'}]` : 'Tous';
+  el.chatCh.classList.toggle('btn-gold', ch === 'clan');
+  el.chatInput.placeholder = ch === 'clan' ? 'Message au clan…' : 'Entrée pour parler…';
 }
 
 // ------------------------------------------------------------------ input
@@ -321,7 +460,7 @@ attachInput(el.world, renderer, {
   },
   onTap(sx, sy, { button, shift, touch }) {
     lastPaintTile = -1;
-    if (!state.ready) return;
+    if (!state.ready || !inGame) return;
     const [wx, wy] = renderer.toWorld(sx, sy);
     const tx = Math.floor(wx);
     const ty = Math.floor(wy);
@@ -338,13 +477,14 @@ attachInput(el.world, renderer, {
     const building = tx >= 0 && ty >= 0 && tx < state.size && ty < state.size ? state.buildingAt(tx, ty) : null;
     const hasSel = view.selection.size > 0;
     const ownUnit = unit && unit.owner === state.youId;
-    const ownBuilding = building && building.owner === state.youId;
+    const friendlyBuilding = building && (state.friendly(building.owner) || building.kind === 'shrine');
+    const hostileUnit = unit && !state.friendly(unit.owner);
 
-    if (button === 2 || (hasSel && !ownUnit && !ownBuilding)) {
+    if (button === 2 || (hasSel && !ownUnit && !friendlyBuilding)) {
       if (!hasSel) return;
       const ids = [...view.selection];
-      if (unit && !ownUnit) command(ids, { type: 'attack', uid: unit.id }, unit.x, unit.y);
-      else if (building && !ownBuilding) command(ids, { type: 'attack', bid: building.id }, tx + 0.5, ty + 0.5);
+      if (hostileUnit) command(ids, { type: 'attack', uid: unit.id }, unit.x, unit.y);
+      else if (building && !friendlyBuilding) command(ids, { type: 'attack', bid: building.id }, tx + 0.5, ty + 0.5);
       else if (tx >= 0 && ty >= 0 && tx < state.size && ty < state.size) command(ids, { type: 'move', x: tx, y: ty }, tx + 0.5, ty + 0.5);
       return;
     }
@@ -358,7 +498,7 @@ attachInput(el.world, renderer, {
       refreshHud();
       return;
     }
-    if (building) { openCard(building); return; }
+    if (building) { openBuildingCard(building); return; }
     closeCard();
   },
 });
@@ -378,12 +518,12 @@ attachInput(el.world, renderer, {
 }
 
 el.actions.addEventListener('click', (e) => {
-  const btn = e.target.closest('button');
-  if (!btn || !inGame) return;
-  if (btn.dataset.build) setBuild(btn.dataset.build);
-  else if (btn.dataset.train) train(btn.dataset.train);
-  else if (btn.dataset.action === 'army') selectArmy();
-  else if (btn.dataset.action === 'center') centerOnBase();
+  if (!inGame) return;
+  const tabBtn = e.target.closest('.tab');
+  if (tabBtn) { setTab(tabBtn.dataset.tab); return; }
+  const btn = e.target.closest('.act');
+  if (!btn) return;
+  runAction(btn);
   btn.blur();
 });
 el.selRecall.addEventListener('click', () => {
@@ -392,6 +532,15 @@ el.selRecall.addEventListener('click', () => {
 });
 el.selClear.addEventListener('click', clearSelection);
 el.cardClose.addEventListener('click', closeCard);
+el.inviteYes.addEventListener('click', () => conn.send({ t: 'clan', op: 'accept' }));
+el.inviteNo.addEventListener('click', () => conn.send({ t: 'clan', op: 'decline' }));
+el.clanClose.addEventListener('click', () => { el.clan.hidden = true; });
+el.clanForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  conn.send({ t: 'clan', op: 'create', tag: el.clanTag.value });
+  el.clanTag.value = '';
+});
+el.clanLeave.addEventListener('click', () => conn.send({ t: 'clan', op: 'leave' }));
 el.helpBtn.addEventListener('click', () => { el.help.hidden = false; });
 el.helpClose.addEventListener('click', () => { el.help.hidden = true; });
 el.help.addEventListener('click', (e) => { if (e.target === el.help) el.help.hidden = true; });
@@ -404,35 +553,39 @@ el.chatToggle.addEventListener('click', () => {
   el.chatToggle.setAttribute('aria-expanded', String(!collapsed));
   if (!collapsed) clearUnread();
 });
+el.chatCh.addEventListener('click', () => setChannel(chatChannel === 'clan' ? 'all' : 'clan'));
 el.chatInput.addEventListener('focus', () => clearUnread());
 el.chatForm.addEventListener('submit', (e) => {
   e.preventDefault();
   const text = cleanChat(el.chatInput.value);
-  if (text) conn.send({ t: 'chat', text });
+  if (text) conn.send({ t: 'chat', text, ch: chatChannel });
   el.chatInput.value = '';
   el.chatInput.blur();
 });
 
-// Keyboard: shortcuts are layout-agnostic (digits, arrows, X, C, space).
+// Keyboard: digits press the buttons of the current tab, Tab switches tabs.
 const held = new Set();
 window.addEventListener('keydown', (e) => {
   if (!inGame) return;
-  const typing = document.activeElement === el.chatInput;
+  const typing = document.activeElement === el.chatInput || document.activeElement === el.clanTag;
   if (typing) {
-    if (e.key === 'Escape') el.chatInput.blur();
+    if (e.key === 'Escape') document.activeElement.blur();
     return;
   }
   if (!el.help.hidden && e.key === 'Escape') { el.help.hidden = true; return; }
   const k = e.key;
   if (k.startsWith('Arrow')) { held.add(k); e.preventDefault(); return; }
-  const builds = { 1: 'wall', 2: 'tower', 3: 'mine', 4: 'barracks' };
-  if (builds[k]) { setBuild(builds[k]); return; }
-  if (k === '5') { train('warrior'); return; }
-  if (k === '6') { train('archer'); return; }
+  if (k === 'Tab') { e.preventDefault(); setTab(TABS[(TABS.indexOf(tab) + (e.shiftKey ? 2 : 1)) % TABS.length]); return; }
+  const digit = '1234567890'.indexOf(k);
+  if (digit >= 0) {
+    const btn = el.actionButtons.querySelectorAll('.act')[digit];
+    if (btn && digit < tabActions(tab).length) runAction(btn);
+    return;
+  }
   if (k === 'x' || k === 'X') { selectArmy(); return; }
   if ((k === 'c' || k === 'C') && view.selection.size > 0) { el.selRecall.click(); return; }
   if (k === ' ') { e.preventDefault(); centerOnBase(); return; }
-  if (k === 'Escape') { view.build = null; view.selection.clear(); closeCard(); refreshHud(); return; }
+  if (k === 'Escape') { view.build = null; view.selection.clear(); closeCard(); el.clan.hidden = true; refreshHud(); return; }
   if (k === 'Enter') { e.preventDefault(); el.chat.classList.remove('collapsed'); clearUnread(); el.chatInput.focus(); return; }
   if (k === '+' || k === '=') zoomAt(renderer, renderer.width / 2, renderer.height / 2, 1.2);
   if (k === '-' || k === '_') zoomAt(renderer, renderer.width / 2, renderer.height / 2, 1 / 1.2);
@@ -448,7 +601,7 @@ function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
   if (held.size) {
-    const speed = (14 * dt) / renderer.cam.zoom;
+    const speed = (14 * dt) / renderer.cam.zoom * 2;
     if (held.has('ArrowLeft')) renderer.cam.x -= speed;
     if (held.has('ArrowRight')) renderer.cam.x += speed;
     if (held.has('ArrowUp')) renderer.cam.y -= speed;
@@ -461,9 +614,19 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
+// Tell the server where the camera is, so it sends the units around it.
+setInterval(() => {
+  if (!conn || !inGame) return;
+  const x = Math.round(renderer.cam.x);
+  const y = Math.round(renderer.cam.y);
+  if (Math.abs(x - sentView.x) + Math.abs(y - sentView.y) < 2) return;
+  sentView = { x, y };
+  conn.send({ t: 'view', x, y });
+}, 300);
+
 // QA hook: ?debug exposes read access to the client state for automated smoke tests.
 if (new URLSearchParams(window.location.search).has('debug')) {
-  window.__bastions = { state, renderer, view };
+  window.__bastions = { state, renderer, view, setTab };
 }
 
 // Small screens start with the chat and leaderboard folded so the map stays visible.
@@ -474,11 +637,11 @@ if (window.matchMedia('(max-width: 600px)').matches) {
   el.boardToggle.setAttribute('aria-expanded', 'false');
 }
 
-initCosts();
 paintIcons(PLAYER_COLORS[0]);
+renderTab(tab, myColor);
 renderer.resize();
 showLogin();
 requestAnimationFrame(frame);
 
-// Ping for a live connection indicator in the console when debugging.
+// Keep-alive ping.
 setInterval(() => { if (conn && inGame) conn.send({ t: 'ping', n: Date.now() % 1e6 }); }, 20_000);

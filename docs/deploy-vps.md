@@ -162,11 +162,11 @@ le WebSocket est toujours cherché à côté de la page.
 | `PORT` | `3000` | Port HTTP/WebSocket |
 | `HOST` | `0.0.0.0` | Interface d'écoute (`127.0.0.1` derrière nginx) |
 | `DATA_DIR` | `./data` | Dossier de sauvegarde (`world.json`) |
-| `MAP_SIZE` | `96` | Taille de la carte en cases (48–256). Une carte de 96 accueille environ 14 bases, une de 128 environ 25. Seulement à la création du monde. |
+| `MAP_SIZE` | `160` | Taille de la carte en cases (64–256). 160 accueille une vingtaine de bases et 28 camps de monstres. Seulement à la création du monde. |
 | `MAP_SEED` | aléatoire | Graine de la carte, seulement à la création du monde |
 | `OFFLINE_SHIELD` | `true` | Les bases des joueurs hors ligne ne peuvent pas être attaquées |
 | `SHIELD_SECONDS` | `180` | Bouclier à l'arrivée et après une défaite |
-| `START_GOLD` | `220` | Or de départ (montez-le pour des parties plus rapides) |
+| `START_GOLD`, `START_WOOD`, `START_STONE` | `250`, `150`, `100` | Ressources de départ (montez-les pour des parties plus rapides) |
 | `MAX_ONLINE` | `32` | Joueurs connectés en même temps |
 | `MAX_CONN_PER_IP` | `6` | Connexions simultanées par adresse IP |
 | `TRUST_PROXY` | `false` | Lire l'IP réelle dans `X-Forwarded-For` (uniquement derrière un proxy) |
@@ -183,6 +183,10 @@ Redémarrez le serveur après modification ; les joueurs rechargent la page.
 
 - **Sauvegarder le monde** : copiez `data/world.json` (Docker :
   `docker compose cp bastions:/app/data/world.json ./world-backup.json`).
+- **Changer la taille de la carte** : elle est fixée à la création du monde. Un monde
+  créé avant la v2 garde sa carte de 96 (il est converti automatiquement : bois,
+  pierre et Sanctuaire ajoutés). Pour profiter de la grande carte, créez un nouveau
+  monde (ligne suivante).
 - **Nouveau monde** : arrêtez le serveur, renommez ou supprimez `world.json`, puis
   relancez. Une sauvegarde illisible n'est jamais effacée : elle est mise de côté
   (`world.json.corrupt-…`) et un nouveau monde démarre.

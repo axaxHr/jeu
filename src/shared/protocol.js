@@ -4,7 +4,7 @@
  * instant feedback.
  */
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** Limits on what a client may send. */
 export const LIMITS = Object.freeze({

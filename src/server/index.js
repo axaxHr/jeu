@@ -26,7 +26,7 @@ const settings = {
   port: int(env.PORT, 3000, 1, 65535),
   host: env.HOST || '0.0.0.0',
   dataDir: path.resolve(env.DATA_DIR || path.join(here, '..', '..', 'data')),
-  mapSize: int(env.MAP_SIZE, CONFIG.map.size, 48, 256),
+  mapSize: int(env.MAP_SIZE, CONFIG.map.size, 64, 256),
   mapSeed: env.MAP_SEED ? int(env.MAP_SEED, 1, 0, 2 ** 31 - 1) : crypto.randomInt(1, 2 ** 31 - 1),
   offlineShield: bool(env.OFFLINE_SHIELD, true),
   trustProxy: bool(env.TRUST_PROXY, false),
@@ -35,7 +35,11 @@ const settings = {
   inactiveDays: int(env.INACTIVE_DAYS, 21, 0, 3650),
   saveEvery: int(env.SAVE_INTERVAL, 30, 5, 3600),
   shieldSeconds: int(env.SHIELD_SECONDS, CONFIG.spawn.shieldSeconds, 0, 86_400),
-  startGold: int(env.START_GOLD, CONFIG.spawn.startGold, 0, CONFIG.economy.goldCap),
+  startResources: {
+    gold: int(env.START_GOLD, CONFIG.spawn.start.gold, 0, CONFIG.economy.cap),
+    wood: int(env.START_WOOD, CONFIG.spawn.start.wood, 0, CONFIG.economy.cap),
+    stone: int(env.START_STONE, CONFIG.spawn.start.stone, 0, CONFIG.economy.cap),
+  },
 };
 
 const log = (msg) => console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -43,7 +47,7 @@ const saveFile = path.join(settings.dataDir, 'world.json');
 const worldOpts = {
   offlineShield: settings.offlineShield,
   shieldSeconds: settings.shieldSeconds,
-  startGold: settings.startGold,
+  startResources: settings.startResources,
 };
 
 let world = await loadWorld(saveFile, worldOpts, log);
@@ -51,7 +55,8 @@ if (world) {
   log(`Loaded world: ${world.size}×${world.size}, seed ${world.seed}, ${world.players.size} players.`);
 } else {
   world = new World({ seed: settings.mapSeed, size: settings.mapSize, ...worldOpts });
-  log(`New world: ${world.size}×${world.size}, seed ${world.seed}.`);
+  world.seedNeutrals();
+  log(`New world: ${world.size}×${world.size}, seed ${world.seed}, ${world.campCount()} monster camps.`);
 }
 
 const save = () => saveWorld(saveFile, world);

@@ -1,9 +1,13 @@
 /**
  * Client-side mirror of the world, fed by server messages. It never decides
- * game outcomes: it stores what the server said and interpolates unit motion
- * between ticks for smooth rendering.
+ * game outcomes: it stores what the server said, mirrors the build rules for
+ * the placement preview, and interpolates unit motion between ticks.
  */
-import { CONFIG, TILE, BUILDING_KINDS, UNIT_KINDS } from './shared/config.js';
+import { CONFIG, TILE, BUILDING_KINDS, UNIT_KINDS, keepLevel, canAfford } from './shared/config.js';
+import { claimsFrom, territoryOwner, countAround } from './shared/territory.js';
+
+const FX_TYPES = ['melee', 'arrow', 'bolt', 'boulder', 'heal'];
+const FX_DURATION = { melee: 160, arrow: 220, bolt: 170, boulder: 650, heal: 420 };
 
 export class ClientState {
   constructor() {
@@ -21,12 +25,18 @@ export class ClientState {
     this.occ = new Map();
     this.units = new Map();
     this.players = new Map();
-    this.me = { gold: 0, income: 0, glory: 0, units: 0, cap: 0, queue: 0, shield: 0, core: 0 };
+    this.shrine = null;
+    this.me = {
+      gold: 0, wood: 0, stone: 0, income: { gold: 0, wood: 0, stone: 0 }, glory: 0, pop: 0, cap: 0, queue: 0,
+      shield: 0, core: 0, level: 0, techs: { attack: 0, armor: 0 }, clan: null, invite: null,
+    };
     this.fx = [];
     this.alerts = [];
     this.snapAt = 0;
     this.tickMs = 1000 / CONFIG.tickRate;
     this.offlineShield = true;
+    this.claimsVersion = 0;
+    this.claimsCache = { version: -1, claims: [] };
   }
 
   /** Apply the `welcome` message (full state). */
@@ -42,14 +52,22 @@ export class ClientState {
     for (let i = 0; i < bin.length; i++) this.tiles[i] = bin.charCodeAt(i);
     for (const packed of msg.buildings) this.addBuilding(packed);
     this.setPlayers(msg.players);
+    this.shrine = msg.shrine || null;
     this.me = msg.me;
     this.snapAt = now;
   }
 
-  addBuilding([id, owner, kindIndex, x, y, hp]) {
-    const b = { id, owner, kind: BUILDING_KINDS[kindIndex], x, y, hp };
+  /** Add or update a building from its wire tuple [id, owner, kind, x, y, hp, extra]. */
+  addBuilding([id, owner, kindIndex, x, y, hp, extra]) {
+    const old = this.buildings.get(id);
+    if (old && this.occ.get(old.y * this.size + old.x) === id) this.occ.delete(old.y * this.size + old.x);
+    const kind = BUILDING_KINDS[kindIndex];
+    const b = { id, owner, kind, x, y, hp };
+    if (kind === 'core') b.level = extra || 1;
+    if (kind === 'shrine') b.holder = extra || 0;
     this.buildings.set(id, b);
     this.occ.set(y * this.size + x, id);
+    if (kind === 'core' || kind === 'outpost') this.claimsVersion++;
     return b;
   }
 
@@ -58,11 +76,13 @@ export class ClientState {
     if (!b) return null;
     this.buildings.delete(id);
     if (this.occ.get(b.y * this.size + b.x) === id) this.occ.delete(b.y * this.size + b.x);
+    if (b.kind === 'core' || b.kind === 'outpost') this.claimsVersion++;
     return b;
   }
 
-  setPlayers(list) {
+  setPlayers(list, shrine) {
     this.players = new Map(list.map((p) => [p.id, p]));
+    if (shrine !== undefined) this.shrine = shrine;
   }
 
   /** Apply one tick snapshot `{u, fx, ba, bd, bh, te}` and the private status. */
@@ -96,8 +116,8 @@ export class ClientState {
       const prev = this.units.get(id);
       if (prev) {
         // Start the new segment from where the unit is currently drawn.
-        prev.px = prev.px + (prev.x - prev.px) * ease;
-        prev.py = prev.py + (prev.y - prev.py) * ease;
+        prev.px += (prev.x - prev.px) * ease;
+        prev.py += (prev.y - prev.py) * ease;
         if (x > prev.x + 0.004) prev.face = 1;
         else if (x < prev.x - 0.004) prev.face = -1;
         prev.x = x; prev.y = y; prev.hp = u[k + 5];
@@ -106,18 +126,18 @@ export class ClientState {
       }
     }
     for (const [id, unit] of this.units) {
-      if (!seen.has(id)) {
-        this.units.delete(id);
-        this.fx.push({ type: 'puff', x0: unit.x, y0: unit.y, t0: now, dur: 380 });
-      }
+      if (seen.has(id)) continue;
+      this.units.delete(id);
+      // Units leaving the view are not deaths: only puff when they were well inside it.
+      if (unit.hp <= CONFIG.units[unit.kind].hp * 0.5) this.fx.push({ type: 'puff', x0: unit.x, y0: unit.y, t0: now, dur: 380 });
     }
 
     const fx = w.fx;
     for (let k = 0; k < fx.length; k += 5) {
-      const type = ['melee', 'arrow', 'bolt'][fx[k]];
+      const type = FX_TYPES[fx[k]] || 'melee';
       this.fx.push({
         type, x0: fx[k + 1] / 100, y0: fx[k + 2] / 100, x1: fx[k + 3] / 100, y1: fx[k + 4] / 100,
-        t0: now, dur: type === 'melee' ? 160 : type === 'arrow' ? 220 : 170,
+        t0: now, dur: FX_DURATION[type],
       });
     }
   }
@@ -136,19 +156,57 @@ export class ClientState {
   isMine(entity) { return entity.owner === this.youId; }
   tileAt(x, y) { return this.tiles[y * this.size + x]; }
 
+  /** Allied (same clan) or self. */
+  friendly(owner) {
+    if (owner === this.youId) return true;
+    const me = this.players.get(this.youId);
+    const o = this.players.get(owner);
+    return !!me && !!o && !!me.clan && me.clan === o.clan;
+  }
+
+  claims() {
+    if (this.claimsCache.version !== this.claimsVersion) {
+      this.claimsCache = { version: this.claimsVersion, claims: claimsFrom(this.buildings.values()) };
+    }
+    return this.claimsCache.claims;
+  }
+
+  ownerOfTile(x, y) { return territoryOwner(this.claims(), x, y); }
+
+  counts() {
+    const c = Object.fromEntries(BUILDING_KINDS.map((k) => [k, 0]));
+    for (const b of this.buildings.values()) if (b.owner === this.youId) c[b.kind]++;
+    return c;
+  }
+
+  /** Why a building or unit kind is locked for me, or null. */
+  lockReason(def) {
+    if (def.minLevel && this.me.level < def.minLevel) return `Niveau ${def.minLevel} du Donjon`;
+    return null;
+  }
+
   /** Client-side mirror of World.canBuild, for the placement preview only. */
-  canBuild(kind, x, y) {
+  canBuild(kind, x, y, counts = this.counts()) {
     const def = CONFIG.buildings[kind];
     if (!def || x < 0 || y < 0 || x >= this.size || y >= this.size) return 'Hors de la carte.';
-    const core = this.myCore();
-    if (!core) return 'Vous n\'avez plus de Noyau.';
-    const r = CONFIG.territory.radius;
-    if ((x - core.x) ** 2 + (y - core.y) ** 2 > r * r) return 'Hors de votre territoire.';
+    if (!this.myCore()) return 'Vous n\'avez plus de Donjon.';
+    const lock = this.lockReason(def);
+    if (lock) return `${def.name} : débloqué au ${lock.toLowerCase()}.`;
+    if (this.ownerOfTile(x, y) !== this.youId) return 'Hors de votre territoire.';
     if (this.occ.has(y * this.size + x)) return 'Emplacement occupé.';
     const t = this.tileAt(x, y);
     if (def.needsGold && t !== TILE.GOLD) return 'Une Mine doit être posée sur un filon d\'or.';
     if (!def.needsGold && t !== TILE.GRASS) return t === TILE.GOLD ? 'Les filons d\'or sont réservés aux Mines.' : 'Terrain impraticable.';
-    if (this.me.gold < def.cost) return 'Pas assez d\'or.';
+    if (def.near) {
+      const code = def.near === 'forest' ? TILE.FOREST : TILE.ROCK;
+      const n = countAround(x, y, (tx, ty) => tx >= 0 && ty >= 0 && tx < this.size && ty < this.size && this.tileAt(tx, ty) === code);
+      if (n === 0) return def.near === 'forest' ? 'Une Scierie doit toucher la forêt.' : 'Une Carrière doit toucher la roche.';
+    }
+    const kl = keepLevel(this.me.level);
+    if (kind === 'tower' && counts.tower >= kl.towers) return `Maximum ${kl.towers} Tours à ce niveau de Donjon.`;
+    if (kind === 'outpost' && counts.outpost >= kl.outposts) return `Maximum ${kl.outposts} Avant-poste(s) à ce niveau de Donjon.`;
+    if (def.max && counts[kind] >= def.max) return `Une seule ${def.name} par seigneur.`;
+    if (!canAfford(this.me, def.cost)) return 'Ressources insuffisantes.';
     return null;
   }
 

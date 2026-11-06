@@ -39,7 +39,9 @@ function startServer() {
       HOST: '127.0.0.1',
       DATA_DIR: dataDir,
       MAP_SEED: '20261106',
-      START_GOLD: '2500',
+      START_GOLD: '4000',
+      START_WOOD: '3000',
+      START_STONE: '3000',
       SHIELD_SECONDS: '25',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -92,6 +94,32 @@ const probe = {
     }
     return out.sort((a, b) => a.d - b.d);
   }, [code, minR, maxR]),
+  /** Free grass tiles in my territory touching terrain `nearCode` (forest 3, rock 2). */
+  tilesTouching: (page, nearCode, maxR) => page.evaluate(([nearCode, maxR]) => {
+    const { state } = window.__bastions;
+    const c = state.myCore();
+    const out = [];
+    for (let dy = -maxR; dy <= maxR; dy++) {
+      for (let dx = -maxR; dx <= maxR; dx++) {
+        const x = c.x + dx;
+        const y = c.y + dy;
+        if (state.canBuild(nearCode === 3 ? 'sawmill' : 'quarry', x, y)) continue;
+        out.push({ x, y, d: Math.hypot(dx, dy) });
+      }
+    }
+    return out.sort((a, b) => a.d - b.d);
+  }, [nearCode, maxR]),
+  nearestCamp: (page) => page.evaluate(() => {
+    const { state } = window.__bastions;
+    const c = state.myCore();
+    let best = null;
+    for (const b of state.buildings.values()) {
+      if (!b.kind.startsWith('camp_')) continue;
+      const d = Math.hypot(b.x - c.x, b.y - c.y);
+      if (!best || d < best.d) best = { id: b.id, x: b.x, y: b.y, d, kind: b.kind };
+    }
+    return best;
+  }),
   screenOf: (page, x, y) => page.evaluate(([x, y]) => window.__bastions.renderer.toScreen(x + 0.5, y + 0.5), [x, y]),
   setCam: (page, x, y, zoom) => page.evaluate(([x, y, zoom]) => {
     const r = window.__bastions.renderer;
@@ -132,14 +160,29 @@ async function onCanvas(page, tiles) {
   return out;
 }
 
-/** Build a small fortified base around the core using the real UI. */
+async function tab(page, name) {
+  await page.click(`.tab[data-tab="${name}"]`);
+  await sleep(80);
+}
+
+async function act(page, sel) {
+  await page.click(`.act${sel}`);
+  await sleep(60);
+}
+
+/** Build a small fortified base around the keep using the real UI. */
 async function buildBase(page, { touch, towers, walls }) {
-  const pressBuild = async (kind) => page.click(`[data-build="${kind}"]`);
+  const pressBuild = async (kind) => { await tab(page, 'build'); await act(page, `[data-act="build"][data-kind="${kind}"]`); };
   const GRASS = 0;
   const GOLD = 4;
 
   await pressBuild('mine');
   for (const t of (await onCanvas(page, await probe.freeTiles(page, GOLD, 2, 8))).slice(0, 3)) await tapTile(page, t.x, t.y, touch);
+
+  await pressBuild('sawmill');
+  for (const t of (await onCanvas(page, await probe.tilesTouching(page, 3, 8))).slice(0, 1)) await tapTile(page, t.x, t.y, touch);
+  await pressBuild('quarry');
+  for (const t of (await onCanvas(page, await probe.tilesTouching(page, 2, 8))).slice(0, 1)) await tapTile(page, t.x, t.y, touch);
 
   await pressBuild('barracks');
   for (const t of (await onCanvas(page, await probe.freeTiles(page, GRASS, 2, 3))).slice(0, 2)) await tapTile(page, t.x, t.y, touch);
@@ -154,7 +197,7 @@ async function buildBase(page, { touch, towers, walls }) {
   for (const t of picked) await tapTile(page, t.x, t.y, touch);
 
   await pressBuild('wall');
-  // Only tiles drawn on the bare canvas (not under a HUD panel), in angular order around the core.
+  // Only tiles drawn on the bare canvas (not under a HUD panel), in angular order around the keep.
   const core = await probe.core(page);
   const candidates = (await onCanvas(page, await probe.freeTiles(page, GRASS, 6.5, 7.4)))
     .map((t) => ({ ...t, a: Math.atan2(t.y - core.y, t.x - core.x) }));
@@ -177,6 +220,23 @@ async function buildBase(page, { touch, towers, walls }) {
   await sleep(300);
 }
 
+/** Upgrade the keep, then place a stable and a forge (level-2 unlocks). */
+async function expand(page) {
+  await tab(page, 'keep');
+  await act(page, '[data-act="upgrade"]');
+  await page.waitForFunction(() => window.__bastions.state.me.level >= 2, null, { timeout: 4000 })
+    .catch(() => problems.push('keep upgrade did not happen'));
+  await tab(page, 'build');
+  for (const kind of ['stable', 'forge', 'outpost']) {
+    await act(page, `[data-act="build"][data-kind="${kind}"]`);
+    const spots = await onCanvas(page, await probe.freeTiles(page, 0, kind === 'outpost' ? 10 : 2, kind === 'outpost' ? 11 : 4));
+    if (spots[0]) await tapTile(page, spots[0].x, spots[0].y, false);
+  }
+  await page.keyboard.press('Escape');
+  await tab(page, 'keep');
+  await act(page, '[data-act="research"][data-tech="attack"]');
+}
+
 async function main() {
   await waitForServer();
   const browser = await chromium.launch();
@@ -189,7 +249,7 @@ async function main() {
 
   await a.goto(BASE);
   await a.waitForSelector('#login:not([hidden])');
-  await sleep(200);
+  await sleep(400);
   await a.screenshot({ path: path.join(outDir, '01-login-desktop.png') });
   log('login screen captured');
 
@@ -199,41 +259,86 @@ async function main() {
 
   await buildBase(a, { touch: false, towers: 3, walls: 14 });
   await buildBase(b, { touch: true, towers: 3, walls: 8 });
+  await expand(a);
   const ca = await probe.counts(a);
   const cb = await probe.counts(b);
   log(`desktop buildings ${JSON.stringify(ca)}; mobile buildings ${JSON.stringify(cb)}`);
-  if (!(ca.tower >= 2 && ca.barracks >= 1 && ca.wall >= 5)) problems.push(`desktop base incomplete: ${JSON.stringify(ca)}`);
+  for (const k of ['mine', 'sawmill', 'quarry', 'barracks', 'tower', 'stable', 'forge']) {
+    if (!(ca[k] >= 1)) problems.push(`desktop base is missing a ${k}: ${JSON.stringify(ca)}`);
+  }
+  if (!(ca.wall >= 5)) problems.push(`desktop walls not painted: ${JSON.stringify(ca)}`);
   if (!(cb.tower >= 2 && cb.barracks >= 1)) problems.push(`mobile base incomplete: ${JSON.stringify(cb)}`);
+  const meA0 = await probe.me(a);
+  if (meA0.techs.attack !== 1) problems.push('forge research did not apply');
 
-  for (let i = 0; i < 7; i++) await a.click('[data-train="warrior"]');
-  for (let i = 0; i < 5; i++) await a.click('[data-train="archer"]');
-  for (let i = 0; i < 4; i++) await b.click('[data-train="warrior"]');
+  await tab(a, 'army');
+  const train = async (page, kind, n) => { for (let i = 0; i < n; i++) await act(page, `[data-act="train"][data-kind="${kind}"]`); };
+  await train(a, 'warrior', 6);
+  await train(a, 'archer', 4);
+  await train(a, 'healer', 2);
+  await train(a, 'cavalry', 3);
+  await tab(b, 'army');
+  await train(b, 'warrior', 4);
 
   await a.fill('#chat-input', 'Bohémond, tes murs ne tiendront pas !');
   await a.press('#chat-input', 'Enter');
   await b.waitForFunction(() => [...document.querySelectorAll('#chat-log li')].some((li) => li.textContent.includes('tes murs')), null, { timeout: 4000 })
     .catch(() => problems.push('chat line did not reach the mobile player'));
 
-  await sleep(9000);
+  await sleep(12000);
   const coreA = await probe.core(a);
   await probe.setCam(a, coreA.x + 0.5, coreA.y + 0.5, 2.5);
-  await sleep(300);
+  await tab(a, 'build');
+  await sleep(400);
   await a.screenshot({ path: path.join(outDir, '02-base-desktop.png') });
+  await tab(a, 'army');
+  await sleep(200);
+  await a.screenshot({ path: path.join(outDir, '02b-army-tab-desktop.png') });
   await b.screenshot({ path: path.join(outDir, '03-base-mobile.png') });
   log(`army ready: ${JSON.stringify(await probe.me(a))}`);
 
-  // Wait for the mobile player's spawn shield to drop, then raid.
+  // Monster camp: send the army, watch the fight, collect the treasure.
+  const camp = await probe.nearestCamp(a);
+  const gloryBefore = (await probe.me(a)).glory;
+  await a.keyboard.press('x');
+  await probe.setCam(a, camp.x + 0.5, camp.y + 0.5, 2.5);
+  await sleep(300);
+  const [cx, cy] = await probe.screenOf(a, camp.x, camp.y);
+  await a.mouse.click(cx, cy, { button: 'right' });
+  log(`camp raid ordered on ${camp.kind} at ${camp.x},${camp.y} (${camp.d.toFixed(0)} tiles away)`);
+  let campShot = false;
+  for (let i = 0; i < 80; i++) {
+    await sleep(500);
+    const st = await a.evaluate((id) => ({ alive: window.__bastions.state.buildings.has(id), fx: window.__bastions.state.fx.length }), camp.id);
+    if (!campShot && st.fx > 3) {
+      await sleep(800);
+      await a.screenshot({ path: path.join(outDir, '04a-camp-raid-desktop.png') });
+      campShot = true;
+    }
+    if (!st.alive) break;
+  }
+  await sleep(600);
+  const meCamp = await probe.me(a);
+  log(`after camp: ${JSON.stringify({ glory: meCamp.glory, gold: meCamp.gold, pop: meCamp.pop })}`);
+  if (meCamp.glory <= gloryBefore) problems.push('no glory from the monster camp');
+
+  // Wait for the mobile player's spawn shield to drop, then raid what is left.
   await b.waitForFunction(() => window.__bastions.state.me.shield === 0, null, { timeout: 40_000 });
+  if ((await probe.me(a)).pop < 4) {
+    await tab(a, 'army');
+    await train(a, 'warrior', 8);
+    await sleep(12000);
+  }
   const coreB = await probe.core(b);
   await a.keyboard.press('x');
   await probe.setCam(a, coreB.x + 0.5, coreB.y + 0.5, 1.5);
   await sleep(200);
   const [tx, ty] = await probe.screenOf(a, coreB.x, coreB.y);
   await a.mouse.click(tx, ty, { button: 'right' });
-  log(`raid ordered on core at ${coreB.x},${coreB.y}`);
+  log(`raid ordered on keep at ${coreB.x},${coreB.y}`);
 
-  // Follow the battle.
   let shot = false;
+  const gloryRaid = (await probe.me(a)).glory;
   for (let i = 0; i < 90; i++) {
     await sleep(500);
     const fighting = await a.evaluate(() => window.__bastions.state.fx.length);
@@ -252,16 +357,32 @@ async function main() {
       shot = true;
       log('battle captured');
     }
-    const glory = (await probe.me(a)).glory;
-    if (shot && glory >= 100) break;
+    if (shot && (await probe.me(a)).glory >= gloryRaid + 20) break;
   }
   const meA = await probe.me(a);
-  log(`after raid: attacker ${JSON.stringify(meA)}`);
+  log(`after raid: attacker ${JSON.stringify({ glory: meA.glory, gold: meA.gold, pop: meA.pop })}`);
   if (!shot) problems.push('no combat effects observed during the raid');
-  if (meA.glory <= 0) problems.push('attacker earned no glory');
+  if (meA.glory <= gloryRaid) problems.push('attacker earned no glory from the raid');
   await sleep(500);
   await a.screenshot({ path: path.join(outDir, '06-after-raid-desktop.png') });
   await b.screenshot({ path: path.join(outDir, '07-after-raid-mobile.png') });
+
+  // Clan: found one on desktop, invite the mobile player from the leaderboard, accept on mobile.
+  await tab(a, 'keep');
+  await act(a, '[data-act="clan"]');
+  await a.fill('#clan-tag', 'lys');
+  await a.click('#clan-form button[type=submit]');
+  await a.waitForFunction(() => window.__bastions.state.me.clan === 'LYS', null, { timeout: 4000 })
+    .catch(() => problems.push('clan was not founded'));
+  await a.screenshot({ path: path.join(outDir, '10-clan-panel-desktop.png') });
+  await a.click('#clan-close');
+  await a.click('#board-list .row-btn:not(.me)');
+  await a.click('#card-actions .btn-gold');
+  await b.waitForSelector('#invite:not([hidden])', { timeout: 5000 }).catch(() => problems.push('invitation banner not shown'));
+  await b.screenshot({ path: path.join(outDir, '11-clan-invite-mobile.png') });
+  await b.click('#invite-yes').catch(() => {});
+  await b.waitForFunction(() => window.__bastions.state.me.clan === 'LYS', null, { timeout: 5000 })
+    .catch(() => problems.push('invitation was not accepted'));
 
   // Restart the server: the world must persist and both clients must resume their own base.
   const before = await a.evaluate(() => ({ id: window.__bastions.state.youId, n: window.__bastions.state.buildings.size }));
@@ -274,10 +395,11 @@ async function main() {
     .catch(() => problems.push('desktop client did not reconnect after a server restart'));
   await b.waitForFunction(() => document.getElementById('conn').hidden, null, { timeout: 15_000 })
     .catch(() => problems.push('mobile client did not reconnect after a server restart'));
-  const after = await a.evaluate(() => ({ id: window.__bastions.state.youId, n: window.__bastions.state.buildings.size }));
+  const after = await a.evaluate(() => ({ id: window.__bastions.state.youId, n: window.__bastions.state.buildings.size, clan: window.__bastions.state.me.clan }));
   log(`restart: before ${JSON.stringify(before)} after ${JSON.stringify(after)}`);
   if (after.id !== before.id) problems.push('player identity changed across a server restart');
   if (Math.abs(after.n - before.n) > 2) problems.push('buildings were not restored after a server restart');
+  if (after.clan !== 'LYS') problems.push('clan lost across a server restart');
 
   await a.click('#help-btn');
   await sleep(200);

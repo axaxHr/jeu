@@ -5,9 +5,11 @@
  */
 import crypto from 'node:crypto';
 import { WebSocketServer } from 'ws';
-import { CONFIG, BUILDING_KINDS, UNIT_KINDS } from '../shared/config.js';
+import { CONFIG } from '../shared/config.js';
 import { PROTOCOL_VERSION, LIMITS, cleanName, cleanChat, nameKey, isToken } from '../shared/protocol.js';
 import { World } from './world.js';
+
+const VIEW_MARGIN = 4;
 
 /** Token bucket: `rate` messages per second, bursts up to `burst`. */
 const RATE = { rate: 20, burst: 40, kickAfterDrops: 200 };
@@ -55,7 +57,7 @@ export class GameServer {
   constructor({ world, httpServer, options = {}, save = async () => {}, log = () => {} }) {
     this.world = world;
     this.options = {
-      maxOnline: 32, maxConnPerIp: 6, newPlayersPerIpHour: 3, trustProxy: false,
+      maxOnline: 32, maxConnPerIp: 6, newPlayersPerIpHour: 3, connectsPerIpMinute: CONNECTS_PER_IP_MINUTE, trustProxy: false,
       trustedProxies: [], allowedOrigins: [], inactiveDays: 21, ...options,
     };
     this.save = save;
@@ -153,7 +155,7 @@ export class GameServer {
   allowConnect(ip) {
     const now = Date.now();
     const recent = (this.connectLog.get(ip) || []).filter((t) => now - t < 60_000);
-    if (recent.length >= CONNECTS_PER_IP_MINUTE) { this.connectLog.set(ip, recent); return false; }
+    if (recent.length >= this.options.connectsPerIpMinute) { this.connectLog.set(ip, recent); return false; }
     recent.push(now);
     this.connectLog.set(ip, recent);
     return true;
@@ -178,6 +180,7 @@ export class GameServer {
     this.ipCount.set(ip, (this.ipCount.get(ip) || 0) + 1);
     const session = {
       ws, ip, playerId: 0, tokens: RATE.burst, last: Date.now(), drops: 0, lastChat: 0, alive: true, failedHellos: 0,
+      view: null,
     };
     this.sessions.add(session);
     session.helloTimer = setTimeout(() => { if (!session.playerId) ws.close(1008, 'Identification attendue'); }, HELLO_TIMEOUT_MS);
@@ -265,15 +268,28 @@ export class GameServer {
     let res = null;
     switch (msg.t) {
       case 'build':
-        if (!BUILDING_KINDS.includes(msg.kind) || !isInt(msg.x) || !isInt(msg.y)) return;
+        if (typeof msg.kind !== 'string' || !Object.hasOwn(w.config.buildings, msg.kind) || !isInt(msg.x) || !isInt(msg.y)) return;
         res = w.build(pid, msg.kind, msg.x, msg.y);
         break;
+      case 'upgrade':
+        res = w.upgradeCore(pid);
+        break;
+      case 'research':
+        if (typeof msg.tech !== 'string' || !Object.hasOwn(w.config.techs, msg.tech)) return;
+        res = w.research(pid, msg.tech);
+        break;
+      case 'clan':
+        res = this.onClan(pid, msg);
+        break;
+      case 'view':
+        if (isInt(msg.x) && isInt(msg.y)) session.view = { x: msg.x, y: msg.y };
+        return;
       case 'demolish':
         if (!isInt(msg.id)) return;
         res = w.demolish(pid, msg.id);
         break;
       case 'train':
-        if (!UNIT_KINDS.includes(msg.kind)) return;
+        if (typeof msg.kind !== 'string' || !Object.hasOwn(w.config.units, msg.kind)) return;
         res = w.train(pid, msg.kind);
         break;
       case 'cmd':
@@ -303,6 +319,18 @@ export class GameServer {
     return null;
   }
 
+  onClan(pid, msg) {
+    const w = this.world;
+    switch (msg.op) {
+      case 'create': return w.createClan(pid, msg.tag);
+      case 'invite': return isInt(msg.target) ? w.inviteToClan(pid, msg.target) : null;
+      case 'accept': return w.answerInvite(pid, true);
+      case 'decline': return w.answerInvite(pid, false);
+      case 'leave': return w.leaveClan(pid);
+      default: return null;
+    }
+  }
+
   onChat(session, msg) {
     const now = Date.now();
     if (now - session.lastChat < CHAT_MIN_INTERVAL_MS) { this.error(session, 'Doucement sur le chat !'); return; }
@@ -310,7 +338,16 @@ export class GameServer {
     if (!text) return;
     session.lastChat = now;
     const p = this.world.players.get(session.playerId);
-    this.pushChat({ name: p.name, color: p.color, text, at: now });
+    if (msg.ch === 'clan') {
+      if (!p.clan) { this.error(session, 'Vous n\'êtes dans aucun clan.'); return; }
+      const out = JSON.stringify({ t: 'chat', name: p.name, color: p.color, text, at: now, clan: p.clan });
+      for (const s of this.sessions) {
+        const q = s.playerId && this.world.players.get(s.playerId);
+        if (q && q.clan === p.clan) this.send(s, out);
+      }
+      return;
+    }
+    this.pushChat({ name: p.name, color: p.color, text, at: now, tag: p.clan || undefined });
   }
 
   pushChat(line) {
@@ -386,6 +423,7 @@ export class GameServer {
       tiles: Buffer.from(w.tiles).toString('base64'),
       buildings: [...w.buildings.values()].map(World.packBuilding),
       players: w.playerList(),
+      shrine: w.shrineInfo(),
       chat: this.chatHistory,
       tickRate: CONFIG.tickRate,
       offlineShield: w.offlineShield,
@@ -394,33 +432,46 @@ export class GameServer {
     if (!quiet) this.systemChat(`${player.name} a rejoint la partie.`);
   }
 
-  /** Send this tick's shared snapshot plus each player's private status. */
+  /**
+   * Send this tick's snapshot: buildings changes go to everyone; units and
+   * combat effects only around each player's camera (plus their own units),
+   * which keeps bandwidth flat on a big map.
+   */
   broadcastTick(includePlayers) {
     const w = this.world;
     const ev = w.events;
     const round = (v) => Math.round(v * 100);
-    const shared = JSON.stringify({
-      u: w.packUnits(),
-      fx: ev.fx.map((v, i) => (i % 5 === 0 ? v : round(v))),
+    const buildings = JSON.stringify({
       ba: ev.bAdd.filter((b) => w.buildings.has(b.id)).map(World.packBuilding),
       bd: ev.bDel,
       bh: [...ev.bHp.entries()].map(([id, hp]) => [id, Math.max(0, Math.round(hp))]),
       te: ev.tiles,
-    });
+    }).slice(1, -1);
     const playersMsg = includePlayers || ev.playersDirty
-      ? JSON.stringify({ t: 'players', list: w.playerList() })
+      ? JSON.stringify({ t: 'players', list: w.playerList(), shrine: w.shrineInfo() })
       : null;
+    const R = CONFIG.viewRadius;
 
     for (const s of this.sessions) {
       if (!s.playerId || s.ws.readyState !== 1) continue;
       if (s.ws.bufferedAmount > MAX_BUFFERED_BYTES) continue; // slow client: skip a frame
       const p = w.players.get(s.playerId);
       if (!p) continue;
-      s.ws.send(`{"t":"s","w":${shared},"me":${JSON.stringify(w.playerStatus(p))}}`);
+      const core = w.coreOf(p);
+      const v = s.view || (core ? { x: core.x, y: core.y } : { x: w.size / 2, y: w.size / 2 });
+      const near = (x, y) => Math.abs(x - v.x) <= R + VIEW_MARGIN && Math.abs(y - v.y) <= R + VIEW_MARGIN;
+      const units = w.packUnits((u) => u.owner === p.id || near(u.x, u.y));
+      const fx = [];
+      for (let k = 0; k < ev.fx.length; k += 5) {
+        if (near(ev.fx[k + 3], ev.fx[k + 4]) || near(ev.fx[k + 1], ev.fx[k + 2])) {
+          fx.push(ev.fx[k], round(ev.fx[k + 1]), round(ev.fx[k + 2]), round(ev.fx[k + 3]), round(ev.fx[k + 4]));
+        }
+      }
+      s.ws.send(`{"t":"s","w":{"u":${JSON.stringify(units)},"fx":${JSON.stringify(fx)},${buildings}},"me":${JSON.stringify(w.playerStatus(p))}}`);
       if (playersMsg) s.ws.send(playersMsg);
     }
     for (const n of ev.notices) {
-      const msg = JSON.stringify({ t: 'notice', text: n.text, kind: n.kind, x: n.x, y: n.y });
+      const msg = JSON.stringify({ t: 'notice', text: n.text, kind: n.kind, x: n.x, y: n.y, tag: n.tag, fromName: n.fromName });
       if (n.to === null) {
         for (const s of this.sessions) if (s.playerId) this.send(s, msg);
         if (n.kind === 'kill') this.systemChat(n.text);
