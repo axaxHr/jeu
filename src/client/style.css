@@ -227,14 +227,17 @@ kbd {
 #minimap { display: block; width: 176px; height: 176px; cursor: pointer; image-rendering: pixelated; box-shadow: 0 0 0 2px var(--ink); }
 
 /* ---------- action bar (bottom centre) */
+/* Desktop: the bar spans the room between the chat (left) and the minimap (right). */
 #actions {
-  left: 50%;
-  transform: translateX(-50%);
+  left: calc(min(340px, 34vw) + 2 * var(--gap) + var(--safe-l));
+  right: calc(200px + 2 * var(--gap) + var(--safe-r));
   bottom: calc(var(--gap) + var(--safe-b));
   display: flex;
   gap: 8px;
   padding: 8px;
-  max-width: calc(100vw - 2 * 360px);
+  width: max-content;
+  max-width: calc(100vw - min(340px, 34vw) - 200px - 4 * var(--gap));
+  margin-inline: auto;
 }
 .tabs { display: flex; flex-direction: column; gap: 6px; padding-right: 8px; box-shadow: inset -2px 0 0 var(--panel-lo), inset -4px 0 0 var(--panel-hi); }
 .tab {
@@ -270,10 +273,13 @@ kbd {
   place-content: center;
   justify-items: center;
   gap: 2px;
-  background: rgba(20, 14, 25, 0.78);
+  background: rgba(20, 14, 25, 0.62);
   color: var(--gold);
   font-size: 11px;
+  text-shadow: 1px 1px 0 var(--ink);
 }
+.act.locked .act-name, .act.locked .act-sub { visibility: hidden; }
+.act.locked > img { filter: grayscale(1) brightness(0.7); }
 .act .lock img { width: 18px; height: 18px; }
 .act.locked { cursor: help; }
 .act-sub { min-height: 15px; }
@@ -284,7 +290,7 @@ kbd {
   display: grid;
   justify-items: center;
   gap: 1px;
-  min-width: 64px;
+  min-width: 60px;
   padding: 4px 2px 5px;
   border: 0;
   background: var(--btn);
@@ -293,7 +299,7 @@ kbd {
   font: inherit;
   cursor: pointer;
 }
-.act img { width: 44px; height: 44px; }
+.act img { width: 40px; height: 40px; }
 .act .act-name { font-size: 13px; line-height: 1; white-space: nowrap; }
 .act .cost { font: 400 15px/1 var(--display); color: var(--gold); display: flex; align-items: center; gap: 3px; }
 .act .cost img { width: 13px; height: 13px; }
@@ -312,7 +318,7 @@ kbd {
   position: fixed;
   left: 50%;
   transform: translateX(-50%);
-  bottom: calc(112px + var(--safe-b));
+  bottom: calc(126px + var(--safe-b));
   margin: 0;
   padding: 6px 12px 5px;
   background: rgba(27, 20, 32, 0.88);
@@ -544,11 +550,11 @@ kbd {
 
 /* ---------- small screens */
 @media (max-width: 1100px) {
-  #actions { max-width: calc(100vw - 2 * 210px); }
   #chat { width: 260px; }
+  #actions { left: calc(260px + 2 * var(--gap)); max-width: calc(100vw - 260px - 200px - 4 * var(--gap)); }
 }
 @media (max-width: 900px) {
-  #actions { max-width: calc(100vw - 20px - var(--safe-l) - var(--safe-r)); }
+  #actions { left: calc(var(--gap) + var(--safe-l)); right: calc(var(--gap) + var(--safe-r)); max-width: none; width: auto; }
   #chat, #minimap-wrap { bottom: calc(112px + var(--safe-b)); }
   #minimap { width: 120px; height: 120px; }
   .icon-btn.round { bottom: calc(260px + var(--safe-b)); }

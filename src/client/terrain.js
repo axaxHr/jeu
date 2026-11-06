@@ -68,6 +68,14 @@ export class TerrainPainter {
     return this.tiles[y * this.size + x];
   }
 
+  /** Small rock deposits (at most one rock neighbour) are drawn as boulders on grass. */
+  isBoulder(x, y) {
+    if (this.at(x, y) !== TILE.ROCK) return false;
+    let n = 0;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) if (this.at(x + dx, y + dy) === TILE.ROCK) n++;
+    return n <= 1;
+  }
+
   paintAll() {
     this.paintGround(0, 0, this.size, this.size);
     for (let y = 0; y < this.size; y++) for (let x = 0; x < this.size; x++) this.decorate(x, y);
@@ -104,12 +112,12 @@ export class TerrainPainter {
         let ramp = GRASS;
         let cell = 40;
         if (t === TILE.WATER) { ramp = WATER; cell = 20; }
-        else if (t === TILE.ROCK) { ramp = ROCK; cell = 14; }
+        else if (t === TILE.ROCK && !this.isBoulder(tx, ty)) { ramp = ROCK; cell = 14; }
         else if (t === TILE.FOREST) ramp = FOREST_FLOOR;
         let n = noise(gx, gy, cell, t === TILE.WATER ? 7 : 3) * 0.75
           + noise(gx, gy, 6, 11) * 0.25
           + (BAYER[(gy & 3) * 4 + (gx & 3)] - 0.5) * 0.22;
-        if (t === TILE.ROCK) n = 0.55 + (n - 0.5) * 0.45; // calmer stone: mostly the light shade
+        if (ramp === ROCK) n = 0.55 + (n - 0.5) * 0.45; // calmer stone: mostly the light shade
         const col = ramp[n < 0.33 ? 0 : n < 0.66 ? 1 : 2];
         const o = (py * w + px) * 4;
         d[o] = col[0]; d[o + 1] = col[1]; d[o + 2] = col[2]; d[o + 3] = 255;
@@ -141,6 +149,24 @@ export class TerrainPainter {
         const wy = Y + 4 + Math.floor(hash(x, y, 2) * 9);
         this.px(PAL.w3, wx, wy, 3, 1);
         this.px(PAL.w3, wx + 1, wy - 1, 2, 1);
+      }
+      return;
+    }
+
+    if (t === TILE.ROCK && this.isBoulder(x, y)) {
+      // Two or three rounded boulders with a lit top and a ground shadow.
+      const stones = [[2, 6, 7, 6], [8, 3, 6, 6], [6, 9, 8, 6]];
+      for (let k = 0; k < stones.length; k++) {
+        const [sx, sy, w, hh] = stones[k];
+        const ox = X + sx + Math.floor(hash(x, y, 100 + k) * 2);
+        const oy = Y + sy;
+        this.px('rgba(20, 14, 26, 0.35)', ox + 1, oy + hh - 1, w, 2);
+        this.px(PAL.ink, ox, oy + 1, w, hh - 2);
+        this.px(PAL.ink, ox + 1, oy, w - 2, hh);
+        this.px(PAL.s2, ox + 1, oy + 1, w - 2, hh - 2);
+        this.px(PAL.s3, ox + 1, oy + 1, w - 3, 2);
+        this.px(PAL.s4, ox + 2, oy + 1, 2, 1);
+        this.px(PAL.s1, ox + 1, oy + hh - 2, w - 2, 1);
       }
       return;
     }

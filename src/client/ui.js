@@ -108,8 +108,8 @@ function actionLabel(a) {
   switch (a.act) {
     case 'build': return { name: CONFIG.buildings[a.kind].name, preview: a.kind };
     case 'train': return { name: CONFIG.units[a.kind].name, preview: a.kind };
-    case 'army': return { name: 'Tout', icon: 'sword', note: 'sélectionner' };
-    case 'recall': return { name: 'Rappel', icon: 'flag', note: 'tout rentre' };
+    case 'army': return { name: 'Tout', icon: 'sword', note: 'sélection' };
+    case 'recall': return { name: 'Rappel', icon: 'flag', note: 'rentrer' };
     case 'upgrade': return { name: 'Donjon', preview: 'core' };
     case 'research': return { name: CONFIG.techs[a.tech].name.split(' ')[0], icon: a.tech === 'attack' ? 'sword' : 'shield' };
     case 'clan': return { name: 'Clan', icon: 'flag', note: 'alliances' };

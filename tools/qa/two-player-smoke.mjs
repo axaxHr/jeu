@@ -268,8 +268,8 @@ async function main() {
   }
   if (!(ca.wall >= 5)) problems.push(`desktop walls not painted: ${JSON.stringify(ca)}`);
   if (!(cb.tower >= 2 && cb.barracks >= 1)) problems.push(`mobile base incomplete: ${JSON.stringify(cb)}`);
-  const meA0 = await probe.me(a);
-  if (meA0.techs.attack !== 1) problems.push('forge research did not apply');
+  await a.waitForFunction(() => window.__bastions.state.me.techs.attack === 1, null, { timeout: 4000 })
+    .catch(() => problems.push('forge research did not apply'));
 
   await tab(a, 'army');
   const train = async (page, kind, n) => { for (let i = 0; i < n; i++) await act(page, `[data-act="train"][data-kind="${kind}"]`); };
@@ -339,19 +339,23 @@ async function main() {
 
   let shot = false;
   const gloryRaid = (await probe.me(a)).glory;
-  for (let i = 0; i < 90; i++) {
+  const armyCentre = () => a.evaluate(() => {
+    const { state } = window.__bastions;
+    const mine = [...state.units.values()].filter((u) => u.owner === state.youId);
+    if (mine.length === 0) return null;
+    return { x: mine.reduce((s, u) => s + u.x, 0) / mine.length, y: mine.reduce((s, u) => s + u.y, 0) / mine.length };
+  });
+  // The map is big: follow the army (the server only sends what is around the camera).
+  for (let i = 0; i < 180; i++) {
     await sleep(500);
-    const fighting = await a.evaluate(() => window.__bastions.state.fx.length);
+    const mid = await armyCentre();
+    if (mid) await probe.setCam(a, mid.x, mid.y, 2.5);
+    const fighting = await a.evaluate(() => window.__bastions.state.fx.filter((f) => f.type !== 'order').length);
     if (!shot && fighting > 3) {
       await sleep(1200);
-      const mid = await a.evaluate(() => {
-        const { state } = window.__bastions;
-        const mine = [...state.units.values()].filter((u) => u.owner === state.youId);
-        if (mine.length === 0) return null;
-        return { x: mine.reduce((s, u) => s + u.x, 0) / mine.length, y: mine.reduce((s, u) => s + u.y, 0) / mine.length };
-      });
-      if (mid) await probe.setCam(a, mid.x, mid.y, 2.5);
-      await sleep(250);
+      const m2 = await armyCentre();
+      if (m2) await probe.setCam(a, m2.x, m2.y, 2.5);
+      await sleep(400);
       await a.screenshot({ path: path.join(outDir, '04-raid-desktop.png') });
       await b.screenshot({ path: path.join(outDir, '05-under-attack-mobile.png') });
       shot = true;

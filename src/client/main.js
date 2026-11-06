@@ -526,6 +526,12 @@ el.actions.addEventListener('click', (e) => {
   runAction(btn);
   btn.blur();
 });
+// A mouse wheel scrolls the action buttons sideways when they overflow.
+el.actionButtons.addEventListener('wheel', (e) => {
+  if (el.actionButtons.scrollWidth <= el.actionButtons.clientWidth || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+  e.preventDefault();
+  el.actionButtons.scrollLeft += e.deltaY;
+}, { passive: false });
 el.selRecall.addEventListener('click', () => {
   const core = state.myCore();
   if (core) command([...view.selection], { type: 'recall' }, core.x + 0.5, core.y + 0.5);

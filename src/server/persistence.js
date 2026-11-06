@@ -36,7 +36,7 @@ export async function loadWorld(file, opts, log = () => {}) {
   }
   try {
     const data = JSON.parse(text);
-    if (data.version !== 1) throw new Error(`unsupported save version ${data.version}`);
+    if (data.version !== 1 && data.version !== 2) throw new Error(`unsupported save version ${data.version}`);
     return World.fromJSON(data, opts);
   } catch (err) {
     const aside = `${file}.corrupt-${Date.now()}`;
