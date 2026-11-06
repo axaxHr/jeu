@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#1b1420">
+  <meta name="description" content="Bastions : jeu de stratégie multijoueur en pixel art. Bâtissez votre forteresse, levez une armée, rasez les bastions voisins.">
+  <title>Bastions</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="fonts/pixelify-sans-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="fonts/jersey-10-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="main.js"></script>
+</head>
+<body>
+  <canvas id="world" aria-label="Carte du monde"></canvas>
+
+  <div id="hud" hidden>
+    <section id="status" class="px-panel" aria-label="Ressources">
+      <div class="res" title="Or (revenu par seconde)">
+        <img data-icon="coin" alt="">
+        <b id="st-gold">0</b>
+        <small id="st-income">+0/s</small>
+      </div>
+      <div class="res" title="Armée (unités / population maximale)">
+        <img data-icon="helmet" alt="">
+        <b id="st-army">0/0</b>
+        <small id="st-queue"></small>
+      </div>
+      <div class="res" title="Gloire">
+        <img data-icon="crown" alt="">
+        <b id="st-glory">0</b>
+      </div>
+      <div class="res res-shield" id="st-shield-wrap" title="Bouclier de départ" hidden>
+        <img data-icon="shield" alt="">
+        <b id="st-shield">0:00</b>
+      </div>
+    </section>
+
+    <section id="board" class="px-panel" aria-label="Classement">
+      <button id="board-toggle" class="panel-title" type="button" aria-expanded="true">
+        <img data-icon="crown" alt="">Seigneurs <span id="board-count"></span>
+      </button>
+      <ol id="board-list"></ol>
+    </section>
+
+    <div id="toasts" aria-live="polite"></div>
+
+    <section id="card" class="px-panel" hidden aria-live="polite">
+      <div class="card-head">
+        <strong id="card-title"></strong>
+        <button id="card-close" class="icon-btn" type="button" aria-label="Fermer">×</button>
+      </div>
+      <p id="card-body"></p>
+      <button id="card-action" class="btn" type="button"></button>
+    </section>
+
+    <section id="selection" class="chip" hidden>
+      <img data-icon="sword" alt="">
+      <span id="sel-count"></span>
+      <button id="sel-recall" class="btn btn-small" type="button">Rappel</button>
+      <button id="sel-clear" class="icon-btn" type="button" aria-label="Désélectionner">×</button>
+    </section>
+
+    <p id="hint" class="hint"></p>
+
+    <nav id="actions" class="px-panel" aria-label="Actions">
+      <div class="group" aria-label="Construire">
+        <button class="act" type="button" data-build="wall"><kbd>1</kbd><img data-preview="wall" alt=""><span class="act-name">Mur</span><span class="cost" data-cost="wall"></span></button>
+        <button class="act" type="button" data-build="tower"><kbd>2</kbd><img data-preview="tower" alt=""><span class="act-name">Tour</span><span class="cost" data-cost="tower"></span></button>
+        <button class="act" type="button" data-build="mine"><kbd>3</kbd><img data-preview="mine" alt=""><span class="act-name">Mine</span><span class="cost" data-cost="mine"></span></button>
+        <button class="act" type="button" data-build="barracks"><kbd>4</kbd><img data-preview="barracks" alt=""><span class="act-name">Caserne</span><span class="cost" data-cost="barracks"></span></button>
+      </div>
+      <div class="group" aria-label="Recruter">
+        <button class="act" type="button" data-train="warrior"><kbd>5</kbd><img data-preview="warrior" alt=""><span class="act-name">Guerrier</span><span class="cost" data-cost="warrior"></span></button>
+        <button class="act" type="button" data-train="archer"><kbd>6</kbd><img data-preview="archer" alt=""><span class="act-name">Archer</span><span class="cost" data-cost="archer"></span></button>
+      </div>
+      <div class="group" aria-label="Armée">
+        <button class="act" type="button" data-action="army"><kbd>X</kbd><img data-icon="sword" alt=""><span class="act-name">Armée</span><span class="cost cost-plain">tout</span></button>
+        <button class="act" type="button" data-action="center"><kbd>␣</kbd><img data-preview="core" alt=""><span class="act-name">Ma base</span><span class="cost cost-plain">centrer</span></button>
+      </div>
+    </nav>
+
+    <section id="chat" aria-label="Discussion">
+      <ol id="chat-log"></ol>
+      <form id="chat-form" class="px-panel" autocomplete="off">
+        <button id="chat-toggle" class="icon-btn chat-btn" type="button" aria-expanded="true" aria-label="Discussion">
+          <img data-icon="chat" alt=""><span id="chat-unread" hidden></span>
+        </button>
+        <label class="sr-only" for="chat-input">Message</label>
+        <input id="chat-input" name="chat" maxlength="200" placeholder="Entrée pour parler…" enterkeyhint="send">
+      </form>
+    </section>
+
+    <div id="minimap-wrap" class="px-panel">
+      <canvas id="minimap" aria-label="Mini-carte"></canvas>
+    </div>
+
+    <button id="help-btn" class="icon-btn round px-panel" type="button" aria-label="Aide">?</button>
+  </div>
+
+  <div id="login" class="overlay overlay-title">
+    <div class="title-block">
+      <h1 class="logo">Bastions</h1>
+      <p class="tagline">Bâtis ta forteresse. Lève une armée. Rase les bastions voisins.</p>
+    </div>
+    <form id="login-form" class="px-panel login-panel" autocomplete="on">
+      <div id="resume" hidden>
+        <button id="resume-btn" class="btn btn-gold btn-big" type="button"></button>
+        <button id="forget-btn" class="link" type="button">Jouer avec un autre nom</button>
+      </div>
+      <div id="fresh">
+        <label for="name">Ton nom de seigneur</label>
+        <div class="row">
+          <input id="name" name="name" minlength="2" maxlength="16" required autocomplete="nickname" placeholder="Aliénor">
+          <button class="btn btn-gold btn-big" type="submit">Jouer</button>
+        </div>
+      </div>
+      <p id="login-error" class="error" role="alert"></p>
+      <ul class="rules">
+        <li><img data-icon="coin" alt=""><span>Pose des <b>Mines</b> sur les filons d'or pour t'enrichir.</span></li>
+        <li><img data-preview="tower" alt=""><span><b>Murs</b> et <b>Tours</b> défendent ton territoire.</span></li>
+        <li><img data-icon="sword" alt=""><span>Recrute à la <b>Caserne</b>, puis touche un bâtiment ennemi pour attaquer.</span></li>
+        <li><img data-icon="crown" alt=""><span>Raser un donjon pille 30 % de l'or adverse. 3 min de bouclier à l'arrivée.</span></li>
+      </ul>
+    </form>
+  </div>
+
+  <div id="help" class="overlay" hidden>
+    <div class="px-panel help-panel">
+      <div class="card-head">
+        <h2>Commandes</h2>
+        <button id="help-close" class="icon-btn" type="button" aria-label="Fermer">×</button>
+      </div>
+      <dl class="keys">
+        <dt>Construire</dt><dd>Choisis un bâtiment, puis touche une case de ton territoire. <kbd>Échap</kbd> annule. Glisse pour tracer un rempart.</dd>
+        <dt>Sélectionner</dt><dd>Bouton <b>Armée</b> (<kbd>X</kbd>), ou cadre à la souris autour de tes unités.</dd>
+        <dt>Attaquer</dt><dd>Avec une sélection, touche (ou clic droit) un bâtiment ou une unité ennemie.</dd>
+        <dt>Déplacer</dt><dd>Avec une sélection, touche (ou clic droit) une case libre.</dd>
+        <dt>Caméra</dt><dd>Glisser au doigt, clic droit ou molette enfoncée, flèches. Zoom : molette, pincer, <kbd>+</kbd> <kbd>−</kbd>.</dd>
+        <dt>Raccourcis</dt><dd><kbd>1</kbd>–<kbd>4</kbd> bâtir, <kbd>5</kbd> <kbd>6</kbd> recruter, <kbd>C</kbd> rappel, <kbd>Espace</kbd> ma base, <kbd>Entrée</kbd> parler.</dd>
+        <dt>Bâtiments</dt><dd>Touche un de tes bâtiments pour le voir ou le démolir (50 % remboursés).</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div id="conn" class="banner" role="status" hidden>Connexion perdue. Reconnexion…</div>
+</body>
+</html>

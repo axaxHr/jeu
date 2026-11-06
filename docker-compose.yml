@@ -1,0 +1,20 @@
+# Lancement : docker compose up -d --build   (détails : docs/deploy-vps.md)
+services:
+  bastions:
+    build: .
+    restart: unless-stopped
+    ports:
+      # "3000:3000" ouvre le jeu sur http://IP-DU-VPS:3000.
+      # Derrière nginx sur le même serveur, préférez "127.0.0.1:3000:3000".
+      - "3000:3000"
+    environment:
+      OFFLINE_SHIELD: "true"   # bases des joueurs hors ligne invulnérables
+      TRUST_PROXY: "false"     # "true" uniquement derrière nginx/Caddy
+      # MAP_SIZE: "128"        # carte plus grande = plus de joueurs
+      # SHIELD_SECONDS: "180"
+      # START_GOLD: "220"
+    volumes:
+      - bastions-data:/app/data
+
+volumes:
+  bastions-data:

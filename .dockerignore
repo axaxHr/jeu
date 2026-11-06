@@ -1,0 +1,15 @@
+.git
+.github
+.claude
+node_modules
+data
+design
+docs
+production
+prototypes
+studio-tests
+tests
+tools
+deploy
+*.md
+!package.json

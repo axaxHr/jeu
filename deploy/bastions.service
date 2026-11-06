@@ -1,0 +1,35 @@
+# systemd unit for BASTIONS. Install:
+#   sudo cp deploy/bastions.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now bastions
+[Unit]
+Description=BASTIONS game server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bastions
+Group=bastions
+WorkingDirectory=/opt/bastions
+ExecStart=/usr/bin/node src/server/index.js
+Restart=on-failure
+RestartSec=3
+
+# Behind nginx on the same machine: listen on localhost only and trust X-Forwarded-For.
+Environment=PORT=3000
+Environment=HOST=127.0.0.1
+Environment=TRUST_PROXY=true
+Environment=DATA_DIR=/var/lib/bastions
+Environment=OFFLINE_SHIELD=true
+StateDirectory=bastions
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=/var/lib/bastions
+
+[Install]
+WantedBy=multi-user.target

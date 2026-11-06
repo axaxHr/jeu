@@ -25,3 +25,24 @@ framework:
 # here. `/settings --local <key>=<value>` writes there; `/settings <key>=<value>`
 # edits this file. See `.claude/docs/config-resolution.md` for the full
 # precedence order.
+
+# Engine: native web, no third-party engine (decision log: design/game-brief.md).
+# `Web` is not one of the studio's routed engines (Godot/Unity/Unreal), so no
+# engine-specialist agent is spawned; the code root resolves from the tree (src/).
+engine:
+  name: "Web"
+  version: "Node.js 20+ / ES2022"
+  language: "JavaScript"
+  rendering: "Canvas 2D (browser client)"
+  physics: "none (tile grid, server-authoritative simulation)"
+
+platform:
+  multiplayer: true          # real-time, server-authoritative (src/server)
+  online: true               # self-hosted Node.js server on the user's VPS
+  targets: [Web]
+  primary_input: "Mouse / Touch"
+  gamepad_support: "None"
+
+commands:
+  test: "npm test"
+  run: "npm start"
