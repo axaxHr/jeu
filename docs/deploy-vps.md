@@ -132,6 +132,26 @@ fichier nginx utilise sa propre variable (`$bastions_connection_upgrade`), il
 ne peut donc pas entrer en conflit avec un `map $connection_upgrade` déjà défini
 par l'autre site.
 
+### Avec Caddy au lieu de nginx
+
+Si le serveur utilise Caddy (fichier `/etc/caddy/Caddyfile`), faites les étapes
+1 et 2 ci-dessus, puis ajoutez le bloc de `deploy/Caddyfile.bastions` **à la fin**
+du Caddyfile, en gardant le bloc du site existant :
+
+```
+bastions.arenarow.io {
+	reverse_proxy 127.0.0.1:3100
+}
+```
+
+```bash
+sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy
+```
+
+Caddy obtient le certificat HTTPS tout seul et transmet le WebSocket. Il remplace
+aussi un `X-Forwarded-For` envoyé par un client, ce que le jeu exige pour ses
+limites par IP.
+
 Le jeu fonctionne aussi dans un sous-dossier (`https://mondomaine.fr/bastions/`) :
 le WebSocket est toujours cherché à côté de la page.
 

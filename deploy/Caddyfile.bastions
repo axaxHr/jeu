@@ -1,0 +1,9 @@
+# BASTIONS behind Caddy, on its own subdomain next to an existing site.
+# Append this block to /etc/caddy/Caddyfile (keep the existing site's block),
+# then: sudo systemctl reload caddy
+# Caddy fetches the HTTPS certificate and proxies the WebSocket by itself.
+# The game must listen on 127.0.0.1:3100 (deploy/bastions.service or
+# deploy/docker-compose.nginx.yml do that).
+bastions.arenarow.io {
+	reverse_proxy 127.0.0.1:3100
+}
